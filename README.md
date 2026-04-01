@@ -21,9 +21,9 @@ CogPic 数据集包含以下几个核心组成部分：
 
 ## 代码仓库结构详解 (Repository Structure)
 
-本项目共包含 20 个核心执行脚本，按照功能流转逻辑严格划分为四大模块：**离线手工特征提取**、**单模态基准测试**、**跨模态深度融合** 以及 **机器学习融合与可解释性**。
+本项目共包含 20 个核心执行脚本，按照功能流转逻辑严格划分为四大模块：**手工特征提取**、**单模态测试**、**跨模态融合** 以及 **机器学习融合与可解释性**。
 
-### 模块一：离线手工特征提取 (Offline Feature Extraction)
+### 模块一：手工特征提取 (Feature Extraction)
 本模块包含 **3** 个脚本，专门用于利用各种领域内专家工具包，将原始的非结构化数据转化为具备明确临床/语言学意义的结构化高维特征表格（CSV）。
 * **`Extract_Audio_Handcrafted_Features.py`**：调用 `parselmouth` (Praat) 和 `librosa`，提取 180+ 维声学特征（F0, 微扰, HNR, 共振峰, 停顿统计, MFCC）。
 * **`Extract_Text_Handcrafted_Features.py`**：结合 `Stanza` 与 `jieba`，提取 60-80 维语言学特征（词汇丰富度 MATTR, 句法树高度, 词性比例, 语义跳跃度）。
@@ -43,7 +43,7 @@ CogPic 数据集包含以下几个核心组成部分：
   * `Single_video_modality_DL_C3D.py`：经典 C3D 架构的实验。
   * `Single_video_modality_ML.py`：基于 OpenFace 提取的 AUs、视线和姿态统计量的 ML 基准。
 
-### 模块三：跨模态深度学习融合 (Cross-Modal DL Fusion)
+### 模块三：跨模态深度学习融合 (Cross-Modal Fusion)
 本模块包含 **7** 个脚本，通过冻结单模态预训练骨干网络，利用 Concat-MLP 进行晚期跨模态融合（Late Fusion）。
 * **双模态消融实验**：
   * `text_audio_diffExtra.py`：文本 + 音频的融合。
