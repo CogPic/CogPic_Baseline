@@ -19,22 +19,6 @@ CogPic 数据集包含以下几个核心组成部分：
 
 数据集旨在为认知功能评估提供一个跨模态的基准，支持研究人员开展多维度分析。
 
-# Multi-Modal Early Warning for Cognitive Impairment
-
-This repository contains a comprehensive, end-to-end framework for evaluating and interpreting multi-modal clinical signals (Text, Audio, and Video) for the early detection of cognitive impairment, such as Mild Cognitive Impairment (MCI) and Alzheimer's Disease (AD). 
-
-The system is primarily based on recorded data from the Picture Description Task. It covers the entire pipeline from low-level raw signal processing, expert handcrafted feature extraction, and single-modal deep learning/machine learning baselines, to cross-modal late fusion and SHAP interpretability analysis.
-
-## Core Features
-
-* Expert Feature Engineering: Utilizes industry-standard toolkits to automatically extract high-dimensional clinical features. This includes OpenFace (facial dynamics/action units), Praat/Parselmouth and OpenSMILE (acoustic/prosodic features), and Stanza/Jieba (linguistics and syntactic complexity).
-* Rigorous Single-Modal Baselines: Conducts exhaustive single-modal deep learning and machine learning ablation experiments on Text (BERT, TextCNN, BiLSTM), Audio (RawWave-LSTM, CRNN, SEResNet50, OpenSMILE ML), and Video (C3D, R3D_18, MC3_18, ResNet+LSTM).
-* Cross-Modal Fusion & Multi-Task Awareness: Implements flexible combinations and late fusion of bi-modal and tri-modal architectures. The tri-modal evaluation scripts feature built-in multi-task granular analysis, outputting not only Global performance but also task-specific metrics (Pic 1, Pic 2, Pic 3).
-* Hardware-Level OOM Defense: The deep learning pipeline incorporates a complete suite of memory protection mechanisms, including Automatic Mixed Precision (AMP), Gradient Clipping, and Gradient Accumulation, ensuring that heavy 3D spatiotemporal models can converge smoothly on consumer-grade GPUs.
-* Academic-Grade Output & Interpretability: Based on fused handcrafted features, the system uses traditional machine learning ensemble models (XGBoost, LightGBM, etc.) to output global predictions and automatically generates SHAP beeswarm plots formatted to strict academic publishing standards (Times New Roman, grayscale styling).
-
----
-
 ## Detailed Repository Structure
 
 This project contains 20 core execution scripts, strictly divided into four major modules according to functional flow logic: Handcrafted Feature Extraction, Single-Modal Testing, Cross-Modal Fusion, and Machine Learning Fusion & Interpretability.
