@@ -19,54 +19,70 @@ CogPic 数据集包含以下几个核心组成部分：
 
 数据集旨在为认知功能评估提供一个跨模态的基准，支持研究人员开展多维度分析。
 
-## 代码仓库结构详解 (Repository Structure)
+# Multi-Modal Early Warning for Cognitive Impairment
 
-本项目共包含 20 个核心执行脚本，按照功能流转逻辑严格划分为四大模块：**手工特征提取**、**单模态测试**、**跨模态融合** 以及 **机器学习融合与可解释性**。
+This repository contains a comprehensive, end-to-end framework for evaluating and interpreting multi-modal clinical signals (Text, Audio, and Video) for the early detection of cognitive impairment, such as Mild Cognitive Impairment (MCI) and Alzheimer's Disease (AD). 
 
-### 模块一：手工特征提取 (Feature Extraction)
-本模块包含 **3** 个脚本，专门用于利用各种领域内专家工具包，将原始的非结构化数据转化为具备明确临床/语言学意义的结构化高维特征表格（CSV）。
-* **`Extract_Audio_Handcrafted_Features.py`**：调用 `parselmouth` (Praat) 和 `librosa`，提取 180+ 维声学特征（F0, 微扰, HNR, 共振峰, 停顿统计, MFCC）。
-* **`Extract_Text_Handcrafted_Features.py`**：结合 `Stanza` 与 `jieba`，提取 60-80 维语言学特征（词汇丰富度 MATTR, 句法树高度, 词性比例, 语义跳跃度）。
-* **`Extract_Video_Handcrafted_Features.py`**：后台静默调用 **OpenFace**，提取面部动作单元 (AUs)、视线角度 (Gaze) 以及三维头部姿态 (Pose) 的动态时序统计量。
+The system is primarily based on recorded data from the Picture Description Task. It covers the entire pipeline from low-level raw signal processing, expert handcrafted feature extraction, and single-modal deep learning/machine learning baselines, to cross-modal late fusion and SHAP interpretability analysis.
 
-### 模块二：单模态极限性能基准 (Single-Modal Baselines)
-本模块包含 **8** 个脚本，用于确立各个模态的性能。
-* **文本 (Text)**：
-  * `Single_text_modality_DL.py`：BERT 微调、TextCNN、BiLSTM、Att-BiLSTM 基准。
-  * `Single_text_modality_ML.py`：BERT `[CLS]` 嵌入向量与手工语言学特征拼接的传统 ML 分类。
-* **音频 (Audio)**：
-  * `Single_audio_modality_DL.py`：基于 Mel 频谱图的视觉架构。
-  * `Single_audio_modality_DL_end_to_end.py`：基于原始一维波形的端到端。
-  * `Single_audio_modality_ML.py`：调用 OpenSMILE 提取 88 维专家声学特征的 ML 分类。
-* **视频 (Video)**：
-  * `Single_video_modality_DL.py`：时空 3D 卷积调优（R3D_18, MC3_18, R2Plus1D, ResNet+LSTM）。
-  * `Single_video_modality_DL_C3D.py`：经典 C3D 架构的实验。
-  * `Single_video_modality_ML.py`：基于 OpenFace 提取的 AUs、视线和姿态统计量的 ML 基准。
+## Core Features
 
-### 模块三：跨模态深度学习融合 (Cross-Modal Fusion)
-本模块包含 **7** 个脚本，通过冻结单模态预训练骨干网络，利用 Concat-MLP 进行晚期跨模态融合（Late Fusion）。
-* **双模态消融实验**：
-  * `text_audio_diffExtra.py`：文本 + 音频的融合。
-  * `text_video_diffExtra.py` 及 `_better.py`：文本 + 视频的融合。
-  * `video_audio_diffExtra.py` 及 `_better.py`：音频 + 视频的融合。
-* **三模态满贯实验**：
-  * `text_video_audio_diffExtra.py`：引入多任务分析（Global, Pic 1, Pic 2, Pic 3 指标矩阵）。
-  * `text_video_audio_diffExtra_better.py`：单模态提取器（TextCNN + SEResNet50 + MC3_18）的组合。
-
-### 模块四：机器学习融合与可解释性 (ML Fusion & Interpretability)
-本模块包含 **2** 个脚本，解决临床医疗场景中至关重要的模型可信度与可解释性问题。
-* **`Interpretability_ML_Fusion.py`**：将 Text、Audio、Video 三大手工特征表合并，评估传统分类器。
-* **`For_SHAP_plot.py`**：自动选出最优树模型，利用 SHAP 计算特征的全局重要性。
+* Expert Feature Engineering: Utilizes industry-standard toolkits to automatically extract high-dimensional clinical features. This includes OpenFace (facial dynamics/action units), Praat/Parselmouth and OpenSMILE (acoustic/prosodic features), and Stanza/Jieba (linguistics and syntactic complexity).
+* Rigorous Single-Modal Baselines: Conducts exhaustive single-modal deep learning and machine learning ablation experiments on Text (BERT, TextCNN, BiLSTM), Audio (RawWave-LSTM, CRNN, SEResNet50, OpenSMILE ML), and Video (C3D, R3D_18, MC3_18, ResNet+LSTM).
+* Cross-Modal Fusion & Multi-Task Awareness: Implements flexible combinations and late fusion of bi-modal and tri-modal architectures. The tri-modal evaluation scripts feature built-in multi-task granular analysis, outputting not only Global performance but also task-specific metrics (Pic 1, Pic 2, Pic 3).
+* Hardware-Level OOM Defense: The deep learning pipeline incorporates a complete suite of memory protection mechanisms, including Automatic Mixed Precision (AMP), Gradient Clipping, and Gradient Accumulation, ensuring that heavy 3D spatiotemporal models can converge smoothly on consumer-grade GPUs.
+* Academic-Grade Output & Interpretability: Based on fused handcrafted features, the system uses traditional machine learning ensemble models (XGBoost, LightGBM, etc.) to output global predictions and automatically generates SHAP beeswarm plots formatted to strict academic publishing standards (Times New Roman, grayscale styling).
 
 ---
 
-##  环境依赖 (Dependencies)
+## Detailed Repository Structure
 
-* **核心环境**：Python 3.8+, PyTorch, Torchvision, Torchaudio
-* **模型与架构**：Hugging Face `transformers` (需本地 `bert-base-chinese`), `timm`
-* **音频处理**：`librosa`, `soundfile`, `parselmouth` (Praat), `opensmile`
-* **文本处理**：`stanza`, `jieba`
-* **视频与图像**：`Pillow`, OpenFace 2.2.0+ (需配置本地 `.exe` 路径)
-* **机器学习与评估**：`scikit-learn`, `xgboost`, `lightgbm`, `catboost`, `shap`, `pandas`, `tqdm`
+This project contains 20 core execution scripts, strictly divided into four major modules according to functional flow logic: Handcrafted Feature Extraction, Single-Modal Testing, Cross-Modal Fusion, and Machine Learning Fusion & Interpretability.
+
+### Module 1: Feature Extraction
+This module contains 3 scripts dedicated to utilizing various domain-expert toolkits to transform raw, unstructured data into structured, high-dimensional feature tables (CSV) with clear clinical and linguistic significance.
+* Extract_Audio_Handcrafted_Features.py: Calls parselmouth (Praat) and librosa to extract 180+ dimensional acoustic features (F0, perturbation, HNR, formants, pause statistics, MFCC).
+* Extract_Text_Handcrafted_Features.py: Combines Stanza and jieba to extract 60-80 dimensional linguistic features (vocabulary richness MATTR, syntactic tree height, part-of-speech ratios, semantic leaps).
+* Extract_Video_Handcrafted_Features.py: Silently calls OpenFace in the background to extract dynamic temporal statistics of facial Action Units (AUs), Gaze, and 3D Head Pose.
+
+### Module 2: Single-Modal Baselines
+This module contains 8 scripts used to establish the performance limits and baselines for each individual modality.
+* Text:
+  * Single_text_modality_DL.py: Baselines for BERT fine-tuning, TextCNN, BiLSTM, and Att-BiLSTM.
+  * Single_text_modality_ML.py: Traditional ML classification concatenating BERT [CLS] embedding vectors with handcrafted linguistic features.
+* Audio:
+  * Single_audio_modality_DL.py: Vision-based architectures utilizing Mel spectrograms.
+  * Single_audio_modality_DL_end_to_end.py: End-to-end architectures based on raw 1D waveforms.
+  * Single_audio_modality_ML.py: ML classification calling OpenSMILE to extract 88-dimensional expert acoustic features.
+* Video:
+  * Single_video_modality_DL.py: Spatiotemporal 3D convolution tuning (R3D_18, MC3_18, R2Plus1D, ResNet+LSTM).
+  * Single_video_modality_DL_C3D.py: Experiments with the classical C3D architecture.
+  * Single_video_modality_ML.py: ML baselines based on OpenFace-extracted statistics for AUs, gaze, and head pose.
+
+### Module 3: Cross-Modal Fusion
+This module contains 7 scripts, utilizing a Concat-MLP for Late Fusion by freezing single-modal pre-trained backbone networks.
+* Bi-Modal Ablation Experiments:
+  * text_audio_diffExtra.py: Text + Audio fusion.
+  * text_video_diffExtra.py and _better.py: Text + Video fusion.
+  * video_audio_diffExtra.py and _better.py: Audio + Video fusion.
+* Tri-Modal Grand Slam Experiments:
+  * text_video_audio_diffExtra.py: Introduces multi-task analysis (Global, Pic 1, Pic 2, and Pic 3 metric matrices).
+  * text_video_audio_diffExtra_better.py: Combination of optimal extractors (TextCNN + SEResNet50 + MC3_18).
+
+### Module 4: ML Fusion & Interpretability
+This module contains 2 scripts to address the crucial issues of model credibility and interpretability in clinical medical scenarios.
+* Interpretability_ML_Fusion.py: Merges the three handcrafted feature tables (Text, Audio, Video) to evaluate traditional classifiers.
+* For_SHAP_plot.py: Automatically selects the optimal tree-based model and utilizes SHAP to calculate the global importance of features.
+
+---
+
+## Dependencies
+
+* Core Environment: Python 3.8+, PyTorch, Torchvision, Torchaudio
+* Models & Architectures: Hugging Face transformers, timm
+* Audio Processing: librosa, soundfile, parselmouth (Praat), opensmile
+* Text Processing: stanza, jieba
+* Video & Images: Pillow, OpenFace 2.2.0+ 
+* Machine Learning & Evaluation: scikit-learn, xgboost, lightgbm, catboost, shap, pandas, tqdm
 
 ---
