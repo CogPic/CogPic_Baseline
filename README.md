@@ -69,3 +69,17 @@ This module contains 2 scripts to address the crucial issues of model credibilit
 * Machine Learning & Evaluation: scikit-learn, xgboost, lightgbm, catboost, shap, pandas, tqdm
 
 ---
+
+## Citation
+If you use the CogPic dataset in your research, please cite the following:
+
+[CogPic: A Multimodal Dataset for Early Cognitive Impairment Assessment via Picture Description Tasks](https://arxiv.org/abs/2604.01626)
+
+
+```bibtex
+@article{cogpic2026,
+  title={CogPic: A Multimodal Dataset for Early Cognitive Impairment Assessment via Picture Description Tasks},
+  author={Wu, Liuyu and Feng, Rui and Li, Jie and Xiang, Wentao and Zhang, Yi and Cao, Yin and Song, Siyang and Gu, Xiao and Li, Jianqing and Wang, Wei},
+  journal={arXiv preprint arXiv:2604.01626},
+  year={2026}
+}
