@@ -1,25 +1,23 @@
 import os
 import time
 import datetime
+import argparse
 import pandas as pd
 import numpy as np
 import warnings
 import logging
-import gc
 
 # ==========================================
-# 0. 环境与日志静音配置
+# 0. Environment Setup & Logging Suppression
 # ==========================================
 warnings.filterwarnings('ignore')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 import jieba
 import jieba.posseg as pseg
-
-jieba.setLogLevel(logging.ERROR)
+logging.getLogger('jieba').setLevel(logging.ERROR)
 
 from transformers import logging as hf_logging
-
 hf_logging.set_verbosity_error()
 
 from sklearn.model_selection import StratifiedGroupKFold
@@ -33,8 +31,9 @@ import xgboost as xgb
 import torch
 from transformers import BertTokenizer, BertModel
 
+
 # ==========================================
-# 模块 1：真实数据读取与解析
+# Module 1: Data Loading & Parsing
 # ==========================================
 def load_real_text_data(base_dir):
     label_map = {'HC': 0, 'MCI': 1, 'AD': 2}
@@ -42,24 +41,19 @@ def load_real_text_data(base_dir):
     labels = []
     groups = []
 
-    print(f"[数据加载] 开始遍历目录: {base_dir}")
+    print(f"[Data Loading] Scanning text directory: {base_dir}")
 
     for label_str, label_idx in label_map.items():
         label_dir = os.path.join(base_dir, label_str)
-        if not os.path.exists(label_dir):
-            continue
+        if not os.path.exists(label_dir): continue
 
-        subject_folders = os.listdir(label_dir)
-        for subject_folder in subject_folders:
+        for subject_folder in os.listdir(label_dir):
             subject_dir = os.path.join(label_dir, subject_folder)
-            if not os.path.isdir(subject_dir):
-                continue
+            if not os.path.isdir(subject_dir): continue
 
-            task_folders = os.listdir(subject_dir)
-            for task_folder in task_folders:
+            for task_folder in os.listdir(subject_dir):
                 task_dir = os.path.join(subject_dir, task_folder)
-                if not os.path.isdir(task_dir):
-                    continue
+                if not os.path.isdir(task_dir): continue
 
                 for file in os.listdir(task_dir):
                     if file.endswith('.txt'):
@@ -79,12 +73,12 @@ def load_real_text_data(base_dir):
                             labels.append(label_idx)
                             groups.append(subject_folder)
 
-    print(f"[数据加载] 完成！共加载 {len(raw_texts)} 条有效文本数据。")
+    print(f"[Data Loading] Complete! Loaded {len(raw_texts)} valid text samples.")
     return raw_texts, np.array(labels), np.array(groups)
 
 
 # ==========================================
-# 模块 2：特征提取 (语言学 + BERT)
+# Module 2: Feature Extraction (Linguistic + BERT)
 # ==========================================
 def extract_linguistic_features(text):
     if not text or len(text.strip()) == 0:
@@ -103,10 +97,8 @@ def extract_linguistic_features(text):
 
     for word, flag in words:
         word_list.append(word)
-        if flag.startswith('r'):
-            pronoun_count += 1
-        elif flag.startswith('n'):
-            noun_count += 1
+        if flag.startswith('r'): pronoun_count += 1
+        elif flag.startswith('n'): noun_count += 1
 
     total_words = len(word_list) if len(word_list) > 0 else 1
 
@@ -117,18 +109,18 @@ def extract_linguistic_features(text):
     return [avg_sentence_length, pronoun_ratio, noun_ratio, ttr]
 
 
-def extract_bert_features(text_list, model_name=r'D:\Code\Project\Dataset\Models\bert-base-chinese'):
-    print("[特征提取] 正在加载本地 BERT 模型和分词器...")
+def extract_bert_features(text_list, model_name='bert-base-chinese'):
+    print(f"[Feature Extraction] Loading BERT model and tokenizer ({model_name})...")
     try:
         tokenizer = BertTokenizer.from_pretrained(model_name)
         model = BertModel.from_pretrained(model_name)
         model.eval()
     except Exception as e:
-        print(f"[错误] 本地 BERT 模型加载失败，请检查路径: {e}")
+        print(f"[Error] Failed to load BERT model. Check path or internet connection: {e}")
         return None
 
     features = []
-    print(f"[特征提取] 开始提取 {len(text_list)} 条文本的 BERT 语义特征...")
+    print(f"[Feature Extraction] Extracting BERT semantic features for {len(text_list)} texts...")
 
     with torch.no_grad():
         for i, text in enumerate(text_list):
@@ -142,24 +134,22 @@ def extract_bert_features(text_list, model_name=r'D:\Code\Project\Dataset\Models
             features.append(cls_embedding)
 
             if (i + 1) % 200 == 0 or (i + 1) == len(text_list):
-                print(f"  - 已处理 {i + 1}/{len(text_list)} 条文本")
+                print(f"  - Processed {i + 1}/{len(text_list)} texts")
 
     return np.array(features)
 
 
 # ==========================================
-# 模块 3：模型构建与单次固定划分验证
+# Module 3: Baseline Experiments
 # ==========================================
 def run_baseline_experiments(X, y, groups):
-    print("\n[模型评估] 开始执行单次固定划分 (Official Single Fixed Split) 验证...")
+    print("\n[Model Evaluation] Executing Official Single Fixed Split...")
 
-    # 核心修改：切出唯一的 1 折作为永久测试集
     sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
     train_idx, test_idx = next(sgkf.split(X, y, groups))
 
-    # 提取测试集里的受试者 ID，用于生成官方测试名单
     test_subjects = np.unique(groups[test_idx])
-    print(f"  -> 划分完成：训练集包含 {len(train_idx)} 个样本，测试集包含 {len(test_idx)} 个样本 (来自 {len(test_subjects)} 名独立受试者)")
+    print(f"  -> Split Summary: Train samples: {len(train_idx)}, Test samples: {len(test_idx)} (from {len(test_subjects)} subjects)")
 
     X_train, X_test = X[train_idx], X[test_idx]
     y_train, y_test = y[train_idx], y[test_idx]
@@ -195,13 +185,12 @@ def run_baseline_experiments(X, y, groups):
                 auc = np.nan
 
             results.append({"Model": name, "UAR": uar, "WAR": war, "AUC": auc})
-            print(f"{name:<25} | {uar:>7.2f}    | {war:>7.2f}    | {auc:>7.2f}    (耗时: {time.time()-start_t:>2.0f}s)")
+            print(f"{name:<25} | {uar:>7.2f}    | {war:>7.2f}    | {auc:>7.2f}    (Time: {time.time()-start_t:>2.0f}s)")
         except Exception as e:
-            print(f"{name:<25} | 运行失败: {str(e)}")
+            print(f"{name:<25} | Failed: {str(e)}")
 
     df_results = pd.DataFrame(results)
 
-    # 渲染纯净版的 LaTeX 代码
     latex_str = "\\begin{table}[h]\n\\centering\n\\begin{tabular}{lccc}\n\\hline\n"
     latex_str += "\\textbf{Model} & \\textbf{UAR (\\%)} & \\textbf{WAR (\\%)} & \\textbf{AUC (\\%)} \\\\\n\\hline\n"
     for _, row in df_results.iterrows():
@@ -213,63 +202,52 @@ def run_baseline_experiments(X, y, groups):
 
 
 # ==========================================
-# 模块 4：输出持久化与官方测试集导出
+# Module 4: Output Persistence
 # ==========================================
 def save_outputs(df_results, latex_str, test_subjects, base_output_path):
     current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    full_save_path = os.path.join(base_output_path, f"ML_Benchmark_{current_time}")
+    full_save_path = os.path.join(base_output_path, f"Text_ML_Benchmark_{current_time}")
 
     try:
         os.makedirs(full_save_path, exist_ok=True)
-        print(f"\n[文件保存] 成功创建实验结果目录: {full_save_path}")
+        print(f"\n[Save] Created results directory: {full_save_path}")
 
-        # 保存性能指标
-        csv_path = os.path.join(full_save_path, "benchmark_metrics.csv")
-        df_results.to_csv(csv_path, index=False)
-
-        # 保存官方测试集受试者名单
+        df_results.to_csv(os.path.join(full_save_path, "benchmark_metrics.csv"), index=False)
         pd.DataFrame({'Subject_ID': test_subjects}).to_csv(os.path.join(full_save_path, "official_test_subjects.csv"), index=False)
 
-        # 保存 LaTeX 表格
-        latex_path = os.path.join(full_save_path, "latex_table_code.txt")
-        with open(latex_path, 'w', encoding='utf-8') as f:
+        with open(os.path.join(full_save_path, "latex_table_code.txt"), 'w', encoding='utf-8') as f:
             f.write(latex_str)
 
-        print(f"[文件保存] 官方基准测试结果与受试者名单已安全保存。")
-
+        print(f"[Save] Benchmark results saved successfully.")
     except Exception as e:
-        print(f"[错误] 创建文件夹或保存文件时发生异常: {e}")
+        print(f"[Error] Failed to save outputs: {e}")
 
 
-# ==========================================
-# 主程序入口
-# ==========================================
 if __name__ == "__main__":
-    DATASET_BASE_DIR = r"D:\Code\Project\Dataset\Full_wly"
-    OUTPUT_BASE_DIR = r"D:\Code\Project\Dataset\Single_modal_Performance\Single_text_ML"
+    parser = argparse.ArgumentParser(description="Text Modality Machine Learning Baseline")
+    parser.add_argument('--data_dir', type=str, required=True, help='Base directory for the text dataset')
+    parser.add_argument('--output_dir', type=str, default='./outputs/Single_text_ML', help='Directory to save results')
+    parser.add_argument('--bert_path', type=str, default='bert-base-chinese', help='Path to local BERT model or HF model name')
+    args = parser.parse_args()
 
-    raw_texts, labels, groups = load_real_text_data(DATASET_BASE_DIR)
+    raw_texts, labels, groups = load_real_text_data(args.data_dir)
 
     if len(raw_texts) == 0:
-        print("[终止] 未加载到任何文本数据，请检查目录。")
+        print("[Terminated] No valid text data loaded.")
     else:
-        print("\n[阶段一] 开始提取手工语言学特征...")
+        print("\n[Phase 1] Extracting handcrafted linguistic features...")
         linguistic_features = np.array([extract_linguistic_features(text) for text in raw_texts])
 
-        print("\n[阶段二] 开始提取 BERT 深层语义特征...")
-        bert_features = extract_bert_features(raw_texts)
+        print("\n[Phase 2] Extracting BERT deep semantic features...")
+        bert_features = extract_bert_features(raw_texts, args.bert_path)
 
         if bert_features is not None:
-            print("\n[特征融合] 正在将语言学特征与 BERT 向量进行水平拼接...")
+            print("\n[Feature Fusion] Concatenating linguistic and BERT features...")
             X_fused = np.hstack((bert_features, linguistic_features))
 
-            print("\n[阶段三] 运行基准模型验证...")
+            print("\n[Phase 3] Running baseline model validation...")
             df_results, latex_snippet, test_subjects = run_baseline_experiments(X_fused, labels, groups)
 
-            print("\n--- 可直接复制的 LaTeX 代码片段 ---")
-            print(latex_snippet)
-            print("----------------------------------\n")
-
-            save_outputs(df_results, latex_snippet, test_subjects, OUTPUT_BASE_DIR)
+            save_outputs(df_results, latex_snippet, test_subjects, args.output_dir)
         else:
-            print("\n[终止] 由于 BERT 特征提取失败，程序已停止。")
+            print("\n[Terminated] Program stopped due to BERT extraction failure.")

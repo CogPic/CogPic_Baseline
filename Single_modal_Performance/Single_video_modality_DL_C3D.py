@@ -2,6 +2,7 @@ import os
 import time
 import datetime
 import copy
+import argparse
 import pandas as pd
 import numpy as np
 import warnings
@@ -12,11 +13,11 @@ from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import recall_score, roc_auc_score
 
 # ==========================================
-# 0. 环境配置
+# 0. Environment Setup
 # ==========================================
 warnings.filterwarnings('ignore')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+# os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com' # Uncomment for mainland China
 
 import torch
 import torch.nn as nn
@@ -26,7 +27,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 # ==========================================
-# 1. C3D 模型定义
+# 1. C3D Model Definition
 # ==========================================
 class C3D(nn.Module):
     def __init__(self, num_classes=3, dropout_rate=0.5):
@@ -85,10 +86,10 @@ class C3D(nn.Module):
 
 
 # ==========================================
-# 2. 数据集模块
+# 2. Dataset Module
 # ==========================================
 def load_video_dataset_from_csv(csv_path, base_dir):
-    print(f"\n[数据加载] 正在读取全局主划分名单: {csv_path}")
+    print(f"\n[Data Loading] Reading master split: {csv_path}")
     df = pd.read_csv(csv_path)
 
     path_mapping = {}
@@ -115,7 +116,7 @@ def load_video_dataset_from_csv(csv_path, base_dir):
             elif split_type == 'Test':
                 test_records.append(record)
 
-    print(f"[数据加载] 完毕！训练集 {len(train_records)} | 验证集 {len(val_records)} | 测试集 {len(test_records)}")
+    print(f"[Data Loading] Done! Train: {len(train_records)} | Val: {len(val_records)} | Test: {len(test_records)}")
 
     class_weights = compute_class_weight('balanced', classes=np.unique(train_labels), y=train_labels)
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
@@ -136,7 +137,7 @@ class VideoFramesDataset(Dataset):
 
 
 # ==========================================
-# 3. 训练与评估函数 (强化版 AMP)
+# 3. Training and Evaluation Function
 # ==========================================
 def train_with_val(model, train_loader, val_loader, epochs, lr, weight_decay, patience, class_weights_tensor):
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -156,25 +157,25 @@ def train_with_val(model, train_loader, val_loader, epochs, lr, weight_decay, pa
             inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
             optimizer.zero_grad(set_to_none=True)
 
-            # 1. 混合精度前向传播
+            # 1. AMP Forward Pass
             with torch.amp.autocast(device_type=DEVICE.type):
                 outputs = model(inputs)
                 loss = criterion(outputs, targets)
 
-            # 2. 缩放 Loss 并反向传播
+            # 2. Scale Loss and Backward
             scaler.scale(loss).backward()
 
-            # 3. 解除缩放并进行梯度裁剪 (防 C3D 梯度爆炸的关键!)
+            # 3. Unscale and Clip Gradients (Crucial for preventing C3D explosion)
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
 
-            # 4. 更新权重并更新缩放器
+            # 4. Step and Update
             scaler.step(optimizer)
             scaler.update()
 
             epoch_loss += loss.item()
 
-        # 验证阶段
+        # Validation Phase
         model.eval()
         val_probs, val_labels = [], []
         with torch.no_grad():
@@ -202,7 +203,7 @@ def train_with_val(model, train_loader, val_loader, epochs, lr, weight_decay, pa
             epochs_no_improve += 1
 
         if epochs_no_improve >= patience:
-            print(f"  [早停] 连续 {patience} 个 Epoch 无提升。")
+            print(f"  [Early Stopping] No improvement for {patience} consecutive epochs.")
             break
 
     model.load_state_dict(best_model_wts)
@@ -232,14 +233,14 @@ def evaluate_on_test(model, test_loader):
 
 
 # ==========================================
-# 4. 实验主流程 (带完整 DataFrame 输出)
+# 4. Main Execution
 # ==========================================
 def run_c3d_experiment_with_outputs(train_records, val_records, test_records, class_weights_tensor):
     train_dataset = VideoFramesDataset(train_records)
     val_dataset = VideoFramesDataset(val_records)
     test_dataset = VideoFramesDataset(test_records)
 
-    # 如果显存爆炸，请将 batch_size 降至 2
+    # Note: Reduce batch_size if OOM occurs
     train_loader = DataLoader(train_dataset, batch_size=6, shuffle=True, num_workers=6, pin_memory=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=6, shuffle=False, num_workers=6, pin_memory=True)
     test_loader = DataLoader(test_dataset, batch_size=6, shuffle=False, num_workers=6, pin_memory=True)
@@ -249,7 +250,7 @@ def run_c3d_experiment_with_outputs(train_records, val_records, test_records, cl
     all_detailed_results = []
 
     print("\n" + "=" * 80)
-    print("开始 C3D 独立实验 (带 AMP 梯度裁剪与自动表格导出)")
+    print("Starting Independent C3D Experiment (AMP + Gradient Clipping)")
     print("=" * 80)
 
     temp_logs = []
@@ -259,7 +260,7 @@ def run_c3d_experiment_with_outputs(train_records, val_records, test_records, cl
         val_auc, best_wts = train_with_val(
             model, train_loader, val_loader, MAX_EPOCHS, lr, WEIGHT_DECAY, PATIENCE, class_weights_tensor
         )
-        print(f"  [LR={lr}] 验证集最佳 AUC: {val_auc:.2f}%")
+        print(f"  [LR={lr}] Best Val AUC: {val_auc:.2f}%")
         temp_logs.append({
             "Model": "C3D",
             "Learning_Rate": lr,
@@ -271,14 +272,12 @@ def run_c3d_experiment_with_outputs(train_records, val_records, test_records, cl
         gc.collect()
 
     best_log = max(temp_logs, key=lambda x: x["Val_AUC"])
-    print(f"\n[最优配置] C3D → Best LR: {best_log['Learning_Rate']}, Val AUC: {best_log['Val_AUC']:.2f}%")
+    print(f"\n[Optimal Config] C3D -> Best LR: {best_log['Learning_Rate']}, Val AUC: {best_log['Val_AUC']:.2f}%")
 
-    # 仅使用最佳权重在测试集评估一次
     final_model = C3D(num_classes=3).to(DEVICE)
     final_model.load_state_dict(best_log['Weights_Dict'])
     test_uar, test_war, test_auc = evaluate_on_test(final_model, test_loader)
 
-    # 构建 DataFrame 数据
     for log in temp_logs:
         is_optimal = (log["Learning_Rate"] == best_log["Learning_Rate"])
         all_detailed_results.append({
@@ -294,7 +293,6 @@ def run_c3d_experiment_with_outputs(train_records, val_records, test_records, cl
     df_results = pd.DataFrame(all_detailed_results)
     df_optimal = df_results[df_results["Is_Optimal_Config"] == True]
 
-    # 生成 LaTeX 表格
     latex_str = "\\begin{table}[htbp]\n\\centering\n\\begin{tabular}{lcccc}\n\\hline\n"
     latex_str += "\\textbf{Model} & \\textbf{Best LR} & \\textbf{Test UAR (\\%)} & \\textbf{Test WAR (\\%)} & \\textbf{Test AUC (\\%)} \\\\\n\\hline\n"
     for _, row in df_optimal.iterrows():
@@ -304,32 +302,32 @@ def run_c3d_experiment_with_outputs(train_records, val_records, test_records, cl
     return df_results, latex_str
 
 
-# ==========================================
-# 主函数：保存 CSV 和 LaTeX
-# ==========================================
 if __name__ == "__main__":
-    CSV_PATH = r"D:\Code\Project\Dataset\Official_Master_Split.csv"
-    DATASET_BASE_DIR = r"D:\Code\Project\Dataset\Full_wly"
-    OUTPUT_BASE_DIR = r"D:\Code\Project\Dataset\Single_modal_Performance\Single_video_DL"
+    parser = argparse.ArgumentParser(description="C3D Video Deep Learning Pipeline")
+    parser.add_argument('--csv_path', type=str, required=True, help='Path to master split CSV file')
+    parser.add_argument('--data_dir', type=str, required=True, help='Base directory for video dataset')
+    parser.add_argument('--output_dir', type=str, default='./outputs/Single_video_DL', help='Directory to save outputs')
 
-    train_recs, val_recs, test_recs, class_wts = load_video_dataset_from_csv(CSV_PATH, DATASET_BASE_DIR)
+    args = parser.parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    train_recs, val_recs, test_recs, class_wts = load_video_dataset_from_csv(args.csv_path, args.data_dir)
 
     if train_recs and test_recs and val_recs:
         df_results, latex_snippet = run_c3d_experiment_with_outputs(train_recs, val_recs, test_recs, class_wts)
 
-        print("\n--- C3D 的 LaTeX 代码片段 ---")
+        print("\n--- LaTeX Table Snippet for Citation ---")
         print(latex_snippet)
 
         current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        full_save_path = os.path.join(OUTPUT_BASE_DIR, f"C3D_Only_Results_{current_time}")
+        full_save_path = os.path.join(args.output_dir, f"C3D_Only_Results_{current_time}")
         os.makedirs(full_save_path, exist_ok=True)
 
-        # 保存 CSV 和 TXT
         csv_save_path = os.path.join(full_save_path, "c3d_grid_search_metrics.csv")
         df_results.to_csv(csv_save_path, index=False)
         with open(os.path.join(full_save_path, "c3d_latex_table.txt"), 'w', encoding='utf-8') as f:
             f.write(latex_snippet)
 
-        print(f"\n[完成] C3D 实验结果及表格已完美导出至: {full_save_path}")
+        print(f"\n[Execution Complete] Results and tables exported to: {full_save_path}")
     else:
-        print("[错误] 数据加载失败，请检查路径。")
+        print("[Error] Data loading failed. Please verify the paths.")

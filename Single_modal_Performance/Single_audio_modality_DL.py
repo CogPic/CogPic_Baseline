@@ -2,21 +2,24 @@ import os
 import time
 import datetime
 import copy
+import argparse
 import pandas as pd
 import numpy as np
 import warnings
 import gc
 
-# 引入 compute_class_weight 解决类别不平衡
+# Handle class imbalance
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import recall_score, roc_auc_score
 
 # ==========================================
-# 0. 环境配置：警告静音与网络镜像源加速
+# 0. Environment Setup
 # ==========================================
 warnings.filterwarnings('ignore')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+
+# Optional: Uncomment the following line to speed up HuggingFace downloads in mainland China
+# os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
 import torch
 import torch.nn as nn
@@ -29,12 +32,9 @@ import torchvision.transforms as transforms
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ====================== 手动 SEResNet50 权重路径 ======================
-SERESNET50_WEIGHT_PATH = r"D:\Code\Project\Dataset\Models\seresnet50.ra2_in1k\pytorch_model.bin"
-
 
 # ==========================================
-# 模块 1：深度学习模型库
+# Module 1: Deep Learning Model Library
 # ==========================================
 class CustomCRNN(nn.Module):
     def __init__(self, num_classes=3):
@@ -59,25 +59,30 @@ class CustomCRNN(nn.Module):
         return self.fc(out.mean(dim=1))
 
 
-def build_model(model_name, num_classes=3):
+def build_model(model_name, num_classes=3, weight_path=None):
     if model_name == "ResNet18":
         model = timm.create_model('resnet18', pretrained=True, num_classes=num_classes)
     elif model_name == "ResNetSE":
         model = timm.create_model('seresnet50.ra2_in1k', pretrained=False, num_classes=1000)
-        state_dict = torch.load(SERESNET50_WEIGHT_PATH, map_location='cpu')
-        model.load_state_dict(state_dict, strict=True)
+        # Load local pretrained weights if provided
+        if weight_path and os.path.exists(weight_path):
+            state_dict = torch.load(weight_path, map_location='cpu')
+            model.load_state_dict(state_dict, strict=True)
+        else:
+            print(
+                f" [Warning] Pretrained weight path for {model_name} not found or not provided. Training from scratch.")
         model.reset_classifier(num_classes)
     elif model_name == "CRNN":
         model = CustomCRNN(num_classes=num_classes)
     elif model_name == "ViT (AST Surrogate)":
         model = timm.create_model('vit_base_patch16_224', pretrained=True, num_classes=num_classes)
     else:
-        raise ValueError(f"不支持的模型名称: {model_name}")
+        raise ValueError(f"Unsupported model name: {model_name}")
     return model
 
 
 # ==========================================
-# 模块 2：音频处理管道 (三划分适配 & ImageNet 对齐)
+# Module 2: Audio Processing Pipeline (Spectrogram)
 # ==========================================
 class FixedAudioDataset(Dataset):
     def __init__(self, file_paths, labels, target_sr=16000, target_duration=5.0):
@@ -91,7 +96,7 @@ class FixedAudioDataset(Dataset):
         )
         self.db_transform = torchaudio.transforms.AmplitudeToDB()
 
-        # 【核心新增】：对齐预训练视觉骨干网络的 ImageNet 均值和方差
+        # Align with ImageNet mean and variance for pretrained visual backbones
         self.imagenet_normalize = transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225]
@@ -127,13 +132,13 @@ class FixedAudioDataset(Dataset):
             mel_spec = self.mel_transform(waveform)
             mel_db = self.db_transform(mel_spec)
 
-            # 实例级标准化 (屏蔽特定录音设备的全局音量差异)
+            # Instance-level standardization (Eliminate global volume differences)
             mel_db = (mel_db - mel_db.mean()) / (mel_db.std() + 1e-6)
 
-            # 转伪彩 3 通道
+            # Convert to pseudo-color 3 channels
             mel_rgb = mel_db.repeat(3, 1, 1)
 
-            # 【应用 ImageNet 归一化】
+            # Apply ImageNet normalization
             mel_rgb = self.imagenet_normalize(mel_rgb)
 
             mel_final = F.interpolate(mel_rgb.unsqueeze(0), size=(224, 224), mode='bilinear',
@@ -141,12 +146,12 @@ class FixedAudioDataset(Dataset):
             return mel_final, self.labels[idx]
 
         except Exception as e:
-            print(f" [警告] 音频读取失败 {file_path}: {e}")
+            print(f" [Warning] Failed to read audio {file_path}: {e}")
             return torch.zeros((3, 224, 224)), self.labels[idx]
 
 
 def load_audio_dataset_from_csv(csv_path, audio_base_dir):
-    print(f"\n[数据加载] 正在读取全局主划分名单: {csv_path}")
+    print(f"\n[Data Loading] Reading master split list: {csv_path}")
     df = pd.read_csv(csv_path)
 
     path_mapping = {}
@@ -177,22 +182,22 @@ def load_audio_dataset_from_csv(csv_path, audio_base_dir):
                 test_paths.append(file_path)
                 test_labels.append(label_idx)
 
-    print(f"[数据加载] 完毕！成功装载: 训练集 {len(train_paths)} | 验证集 {len(val_paths)} | 测试集 {len(test_paths)}")
+    print(f"[Data Loading] Done! Train: {len(train_paths)} | Val: {len(val_paths)} | Test: {len(test_paths)}")
 
-    # 自动计算类权重解决不平衡问题
+    # Automatically calculate class weights to solve the imbalance problem
     class_weights = compute_class_weight(
         class_weight='balanced',
         classes=np.unique(train_labels),
         y=train_labels
     )
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
-    print(f"[数据分布] 自动计算训练集损失权重 (HC/MCI/AD): {class_weights_tensor.cpu().numpy()}")
+    print(f"[Data Distribution] Training set loss weights (HC/MCI/AD): {class_weights_tensor.cpu().numpy()}")
 
     return train_paths, train_labels, val_paths, val_labels, test_paths, test_labels, class_weights_tensor
 
 
 # ==========================================
-# 模块 3：严谨的盲测日志与模型调优
+# Module 3: Model Training and Evaluation
 # ==========================================
 def evaluate_model(model, dataloader):
     model.eval()
@@ -217,8 +222,6 @@ def evaluate_model(model, dataloader):
 
 def train_eval_single_fold(model, train_loader, val_loader, epochs, lr, weight_decay, patience, class_weights_tensor):
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-
-    # 【注入类权重】
     criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
 
     best_val_auc = -1.0
@@ -251,10 +254,9 @@ def train_eval_single_fold(model, train_loader, val_loader, epochs, lr, weight_d
 
 
 def run_audio_dl_experiments(train_paths, train_labels, val_paths, val_labels, test_paths, test_labels,
-                             class_weights_tensor):
-    print(f"\n[环境检查] 深度计算核心: {DEVICE.type.upper()}")
+                             class_weights_tensor, weight_path=None):
+    print(f"\n[Environment] Compute Device: {DEVICE.type.upper()}")
 
-    # 构建懒加载 Dataset
     train_ds = FixedAudioDataset(train_paths, train_labels)
     val_ds = FixedAudioDataset(val_paths, val_labels)
     test_ds = FixedAudioDataset(test_paths, test_labels)
@@ -265,7 +267,7 @@ def run_audio_dl_experiments(train_paths, train_labels, val_paths, val_labels, t
 
     model_names = ["ResNet18", "ResNetSE", "CRNN", "ViT (AST Surrogate)"]
 
-    # 【分离超参池】保护巨型模型
+    # Separate hyperparameter pools to protect giant models
     lr_list_cnn = [1e-3, 5e-4, 1e-4, 5e-5]
     lr_list_vit = [5e-5, 3e-5, 2e-5, 1e-5]
     WEIGHT_DECAY = 1e-4
@@ -273,23 +275,23 @@ def run_audio_dl_experiments(train_paths, train_labels, val_paths, val_labels, t
     all_detailed_results = []
 
     print("\n" + "=" * 70)
-    print("开始严谨调优 (每步表现计入CSV，仅最优模型接受测试集检验)")
+    print("Starting Grid Search (Best model evaluated on blind test set)")
     print("=" * 70)
 
     for name in model_names:
-        print(f"\n>>> 调优模型: {name} <<<")
+        print(f"\n>>> Tuning Model: {name} <<<")
         is_vit = ("ViT" in name)
         current_lr_list = lr_list_vit if is_vit else lr_list_cnn
 
-        # 动态控制收敛策略
+        # Dynamic convergence strategy
         MAX_EPOCHS = 10 if is_vit else 50
         PATIENCE = 3 if is_vit else 7
 
         temp_logs = []
 
-        # 1. 验证集上的盲测网格搜索
+        # 1. Grid search on the validation set
         for current_lr in current_lr_list:
-            model = build_model(name, num_classes=3).to(DEVICE)
+            model = build_model(name, num_classes=3, weight_path=weight_path).to(DEVICE)
             start_t = time.time()
 
             val_auc, best_wts = train_eval_single_fold(
@@ -298,7 +300,7 @@ def run_audio_dl_experiments(train_paths, train_labels, val_paths, val_labels, t
                 patience=PATIENCE, class_weights_tensor=class_weights_tensor
             )
 
-            print(f"  [-] LR: {current_lr:<7} | 验证集 AUC: {val_auc:>6.2f}% (耗时: {time.time() - start_t:>2.0f}s)")
+            print(f"  [-] LR: {current_lr:<7} | Val AUC: {val_auc:>6.2f}% (Time: {time.time() - start_t:>2.0f}s)")
 
             temp_logs.append({
                 "Model": name,
@@ -311,23 +313,23 @@ def run_audio_dl_experiments(train_paths, train_labels, val_paths, val_labels, t
             if torch.cuda.is_available(): torch.cuda.empty_cache()
             gc.collect()
 
-        # 2. 锁定最优超参
+        # 2. Lock optimal hyperparameters
         best_log = max(temp_logs, key=lambda x: x["Val_AUC"])
         print(
-            f"[!] {name} 调优结束 -> 最优 LR: {best_log['Learning_Rate']} (验证集最高 AUC: {best_log['Val_AUC']:.2f}%)")
+            f"[!] {name} Tuning Complete -> Best LR: {best_log['Learning_Rate']} (Best Val AUC: {best_log['Val_AUC']:.2f}%)")
 
-        # 3. 终极测试 (唯一一次 Test Set 前向传播)
-        print(f"[*] 正在解锁盲测集，进行唯一一次终极测试...")
-        final_model = build_model(name, num_classes=3).to(DEVICE)
+        # 3. Final Test (Single forward pass on the Test Set)
+        print(f"[*] Unlocking blind test set for final evaluation...")
+        final_model = build_model(name, num_classes=3, weight_path=weight_path).to(DEVICE)
         final_model.load_state_dict(best_log['Weights_Dict'])
 
         test_uar, test_war, test_auc = evaluate_model(final_model, test_loader)
-        print(f"    --> 测试集终极表现: AUC {test_auc:.2f}% | UAR {test_uar:.2f}% | WAR {test_war:.2f}%\n")
+        print(f"    --> Final Test Performance: AUC {test_auc:.2f}% | UAR {test_uar:.2f}% | WAR {test_war:.2f}%\n")
 
         del final_model
         gc.collect()
 
-        # 4. 汇总填表
+        # 4. Summarize results
         for log in temp_logs:
             is_optimal = (log["Learning_Rate"] == best_log["Learning_Rate"])
             all_detailed_results.append({
@@ -340,10 +342,10 @@ def run_audio_dl_experiments(train_paths, train_labels, val_paths, val_labels, t
                 "Is_Optimal_Config": is_optimal
             })
 
-    # 生成详细 DataFrame
+    # Generate detailed DataFrame
     df_results = pd.DataFrame(all_detailed_results)
 
-    # 生成供论文引用的 LaTeX (仅最优结果)
+    # Generate LaTeX code for paper citation (Optimal results only)
     df_optimal = df_results[df_results["Is_Optimal_Config"] == True]
 
     latex_str = "\\begin{table}[htbp]\n\\centering\n\\begin{tabular}{lcccc}\n\\hline\n"
@@ -356,31 +358,43 @@ def run_audio_dl_experiments(train_paths, train_labels, val_paths, val_labels, t
 
 
 # ==========================================
-# 模块 4：执行入口
+# Module 4: Execution Entry Point
 # ==========================================
 if __name__ == "__main__":
-    CSV_PATH = r"D:\Code\Project\Dataset\Official_Master_Split.csv"
-    DATASET_BASE_DIR = r"D:\Code\Project\Dataset\Full_wly"
-    OUTPUT_BASE_DIR = r"D:\Code\Project\Dataset\Single_modal_Performance\Single_audio_DL"
+    parser = argparse.ArgumentParser(description="Audio Modality Deep Learning Pipeline (Spectrogram-based)")
+    parser.add_argument('--csv_path', type=str, required=True, help='Path to the master split CSV file')
+    parser.add_argument('--data_dir', type=str, required=True, help='Base directory for the audio dataset')
+    parser.add_argument('--output_dir', type=str, default='./outputs/Single_audio_DL', help='Directory to save outputs')
+    parser.add_argument('--weight_path', type=str, default=None, help='Path to pre-trained SEResNet50 weights')
 
-    print("正在测试 SEResNet50 权重是否能正常加载...")
-    test_model = timm.create_model('seresnet50.ra2_in1k', pretrained=False, num_classes=1000)
-    state_dict = torch.load(SERESNET50_WEIGHT_PATH, map_location='cpu')
-    test_model.load_state_dict(state_dict, strict=True)
-    test_model.reset_classifier(3)
-    print("SEResNet50 权重加载测试成功！\n")
+    args = parser.parse_args()
 
-    tr_p, tr_y, val_p, val_y, ts_p, ts_y, class_wts = load_audio_dataset_from_csv(CSV_PATH, DATASET_BASE_DIR)
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    if args.weight_path and os.path.exists(args.weight_path):
+        print("Testing SEResNet50 weight loading...")
+        test_model = timm.create_model('seresnet50.ra2_in1k', pretrained=False, num_classes=1000)
+        state_dict = torch.load(args.weight_path, map_location='cpu')
+        test_model.load_state_dict(state_dict, strict=True)
+        test_model.reset_classifier(3)
+        print("SEResNet50 weights loaded successfully!\n")
+    elif args.weight_path:
+        print(f"[Warning] Provided weight path does not exist: {args.weight_path}\n")
+
+    tr_p, tr_y, val_p, val_y, ts_p, ts_y, class_wts = load_audio_dataset_from_csv(args.csv_path, args.data_dir)
 
     if len(tr_p) > 0 and len(ts_p) > 0 and len(val_p) > 0:
-        df_results, latex_snippet = run_audio_dl_experiments(tr_p, tr_y, val_p, val_y, ts_p, ts_y, class_wts)
+        df_results, latex_snippet = run_audio_dl_experiments(
+            tr_p, tr_y, val_p, val_y, ts_p, ts_y, class_wts, args.weight_path
+        )
 
-        print("\n--- 供论文直接引用的 LaTeX 代码片段 (仅包含最优表现) ---")
+        print("\n--- LaTeX Table Snippet for Paper (Optimal Performance Only) ---")
         print(latex_snippet)
-        print("--------------------------------------------------\n")
+        print("----------------------------------------------------------------\n")
 
         current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        full_save_path = os.path.join(OUTPUT_BASE_DIR, f"Audio_Opt_Aligned_{current_time}")
+        full_save_path = os.path.join(args.output_dir, f"Audio_Opt_Aligned_{current_time}")
         os.makedirs(full_save_path, exist_ok=True)
 
         csv_save_path = os.path.join(full_save_path, "detailed_grid_search_metrics.csv")
@@ -389,7 +403,8 @@ if __name__ == "__main__":
         with open(os.path.join(full_save_path, "latex_table.txt"), 'w', encoding='utf-8') as f:
             f.write(latex_snippet)
 
-        print(f"\n[执行完毕] 优化结果已安全保存至: {full_save_path}")
-        print(f" -> 详细超参探索日志已保存为: detailed_grid_search_metrics.csv")
+        print(f"\n[Execution Complete] Optimization results saved to: {full_save_path}")
+        print(f" -> Detailed hyperparameter search logs saved as: detailed_grid_search_metrics.csv")
     else:
-        print("[终止] 数据集提取失败，请检查 CSV 文件内容或音频源目录。")
+        print(
+            "[Terminated] Dataset extraction failed. Please check the CSV file content or the audio source directory.")

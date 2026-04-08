@@ -2,21 +2,22 @@ import os
 import time
 import datetime
 import copy
+import argparse
 import pandas as pd
 import numpy as np
 import warnings
 import gc
-from tqdm import tqdm  # 新增：进度条
+from tqdm import tqdm
 
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import recall_score, roc_auc_score
 
 # ==========================================
-# 0. 环境配置
+# 0. Environment Setup
 # ==========================================
 warnings.filterwarnings('ignore')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+# os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com' # Uncomment for mainland China
 
 import torch
 import torch.nn as nn
@@ -25,11 +26,10 @@ import torchvision.models.video as video_models
 import timm
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-TIMM_RESNET18_PATH = r"D:\Code\Project\Dataset\Models\timm_resnet18\pytorch_model.bin"
 
 
 # ==========================================
-# 模块 1：模型定义（保持不变，推荐小优化）
+# Module 1: Model Definitions
 # ==========================================
 class Video3DCNNWrapper(nn.Module):
     def __init__(self, model_name='r3d_18', num_classes=3):
@@ -47,11 +47,16 @@ class Video3DCNNWrapper(nn.Module):
 
 
 class ResNetLSTM(nn.Module):
-    def __init__(self, num_classes=3, freeze_cnn=True):
+    def __init__(self, num_classes=3, freeze_cnn=True, weight_path=None):
         super().__init__()
-        print(" -> [权重加载] ResNet18 → LSTM ...")
-        backbone = timm.create_model('resnet18', pretrained=False, num_classes=1000,
-                                     checkpoint_path=TIMM_RESNET18_PATH)
+        print(" -> [Weights Loading] ResNet18 -> LSTM ...")
+
+        # Load local weights if provided, else download via timm
+        if weight_path and os.path.exists(weight_path):
+            backbone = timm.create_model('resnet18', pretrained=False, num_classes=1000, checkpoint_path=weight_path)
+        else:
+            backbone = timm.create_model('resnet18', pretrained=True, num_classes=1000)
+
         self.cnn = nn.Sequential(*list(backbone.children())[:-1])
 
         if freeze_cnn:
@@ -70,11 +75,15 @@ class ResNetLSTM(nn.Module):
 
 
 class ResNetTransformer(nn.Module):
-    def __init__(self, num_classes=3, freeze_cnn=True):
+    def __init__(self, num_classes=3, freeze_cnn=True, weight_path=None):
         super().__init__()
-        print(" -> [权重加载] ResNet18 → Transformer ...")
-        backbone = timm.create_model('resnet18', pretrained=False, num_classes=1000,
-                                     checkpoint_path=TIMM_RESNET18_PATH)
+        print(" -> [Weights Loading] ResNet18 -> Transformer ...")
+
+        if weight_path and os.path.exists(weight_path):
+            backbone = timm.create_model('resnet18', pretrained=False, num_classes=1000, checkpoint_path=weight_path)
+        else:
+            backbone = timm.create_model('resnet18', pretrained=True, num_classes=1000)
+
         self.cnn = nn.Sequential(*list(backbone.children())[:-1])
 
         if freeze_cnn:
@@ -92,7 +101,7 @@ class ResNetTransformer(nn.Module):
         return self.fc(self.transformer(features).mean(dim=1))
 
 
-def build_video_model(model_name, num_classes=3):
+def build_video_model(model_name, num_classes=3, resnet_weight_path=None):
     if model_name == 'R3D_18':
         return Video3DCNNWrapper('r3d_18', num_classes)
     elif model_name == 'MC3_18':
@@ -100,18 +109,18 @@ def build_video_model(model_name, num_classes=3):
     elif model_name == 'R2Plus1D':
         return Video3DCNNWrapper('r2plus1d_18', num_classes)
     elif model_name == 'ResNet+LSTM':
-        return ResNetLSTM(num_classes)
+        return ResNetLSTM(num_classes, weight_path=resnet_weight_path)
     elif model_name == 'ResNet+Transformer':
-        return ResNetTransformer(num_classes)
+        return ResNetTransformer(num_classes, weight_path=resnet_weight_path)
     else:
-        raise ValueError(f"未知模型: {model_name}")
+        raise ValueError(f"Unknown model: {model_name}")
 
 
 # ==========================================
-# 模块 2：数据集（保持不变）
+# Module 2: Dataset Pipeline
 # ==========================================
 def load_video_dataset_from_csv(csv_path, base_dir):
-    print(f"\n[数据加载] 正在读取全局主划分名单: {csv_path}")
+    print(f"\n[Data Loading] Reading master split: {csv_path}")
     df = pd.read_csv(csv_path)
 
     path_mapping = {}
@@ -139,11 +148,11 @@ def load_video_dataset_from_csv(csv_path, base_dir):
             elif split_type == 'Test':
                 test_records.append(record)
 
-    print(f"[数据加载] 完毕！训练集 {len(train_records)} | 验证集 {len(val_records)} | 测试集 {len(test_records)}")
+    print(f"[Data Loading] Done! Train: {len(train_records)} | Val: {len(val_records)} | Test: {len(test_records)}")
 
     class_weights = compute_class_weight('balanced', classes=np.unique(train_labels), y=train_labels)
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
-    print(f"[类别权重] HC/MCI/AD: {class_weights_tensor.cpu().numpy()}")
+    print(f"[Class Weights] HC/MCI/AD: {class_weights_tensor.cpu().numpy()}")
 
     return train_records, val_records, test_records, class_weights_tensor
 
@@ -163,7 +172,7 @@ class VideoFramesDataset(Dataset):
 
 
 # ==========================================
-# 模块 3：训练函数（新增实时 Epoch + Batch 监控）
+# Module 3: Training Function (With Alignment Fix)
 # ==========================================
 def train_with_val(model, train_loader, val_loader, epochs, lr, weight_decay, patience, class_weights_tensor):
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()),
@@ -175,7 +184,7 @@ def train_with_val(model, train_loader, val_loader, epochs, lr, weight_decay, pa
     best_model_wts = copy.deepcopy(model.state_dict())
     epochs_no_improve = 0
 
-    print(f"开始训练 | LR={lr} | 共 {epochs} 个 Epoch")
+    print(f"Training Started | LR={lr} | Total Epochs: {epochs}")
 
     for epoch in tqdm(range(epochs), desc="Epoch Progress", leave=True):
         model.train()
@@ -183,7 +192,6 @@ def train_with_val(model, train_loader, val_loader, epochs, lr, weight_decay, pa
         batch_count = 0
         start_epoch_time = time.time()
 
-        # Batch 进度条 + 实时 Loss
         for batch_idx, (inputs, targets) in enumerate(
                 tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs} [Batch]", leave=False, ncols=100)):
             batch_start = time.time()
@@ -191,11 +199,19 @@ def train_with_val(model, train_loader, val_loader, epochs, lr, weight_decay, pa
             inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
             optimizer.zero_grad(set_to_none=True)
 
+            # 1. AMP Forward Pass
             with torch.amp.autocast(device_type=DEVICE.type):
                 outputs = model(inputs)
                 loss = criterion(outputs, targets)
 
+            # 2. Scale Loss and Backward
             scaler.scale(loss).backward()
+
+            # 3. CRITICAL ALIGNMENT FIX: Unscale and apply gradient clipping (max_norm=5.0)
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(filter(lambda p: p.requires_grad, model.parameters()), max_norm=5.0)
+
+            # 4. Step and Update
             scaler.step(optimizer)
             scaler.update()
 
@@ -203,13 +219,12 @@ def train_with_val(model, train_loader, val_loader, epochs, lr, weight_decay, pa
             epoch_loss += loss.item()
             batch_count += 1
 
-            # 每10个 batch 打印一次实时信息，避免刷屏太严重
             if (batch_idx + 1) % 10 == 0 or batch_idx == len(train_loader) - 1:
                 avg_loss = epoch_loss / batch_count
-                print(f"  → Epoch {epoch + 1:2d} | Batch {batch_idx + 1:3d}/{len(train_loader)} | "
+                print(f"  -> Epoch {epoch + 1:2d} | Batch {batch_idx + 1:3d}/{len(train_loader)} | "
                       f"Loss: {loss.item():.4f} | Avg Loss: {avg_loss:.4f} | Batch Time: {batch_time:.3f}s")
 
-        # 验证集评估
+        # Validation Phase
         model.eval()
         val_probs, val_labels = [], []
         with torch.no_grad():
@@ -237,7 +252,7 @@ def train_with_val(model, train_loader, val_loader, epochs, lr, weight_decay, pa
             epochs_no_improve += 1
 
         if epochs_no_improve >= patience:
-            print(f"  [早停] 验证集连续 {patience} 个 Epoch 无提升，提前停止训练")
+            print(f"  [Early Stopping] No improvement for {patience} consecutive epochs.")
             break
 
     model.load_state_dict(best_model_wts)
@@ -267,10 +282,10 @@ def evaluate_on_test(model, test_loader):
 
 
 # ==========================================
-# 模块 4：实验主流程（保持你的结构）
+# Module 4: Main Execution
 # ==========================================
-def run_video_dl_experiments(train_records, val_records, test_records, class_weights_tensor):
-    print(f"\n[环境检查] 设备: {DEVICE.type.upper()}")
+def run_video_dl_experiments(train_records, val_records, test_records, class_weights_tensor, resnet_weight_path):
+    print(f"\n[Environment] Device: {DEVICE.type.upper()}")
 
     train_dataset = VideoFramesDataset(train_records)
     val_dataset = VideoFramesDataset(val_records)
@@ -287,22 +302,22 @@ def run_video_dl_experiments(train_records, val_records, test_records, class_wei
     all_detailed_results = []
 
     print("\n" + "=" * 90)
-    print("开始严格学术规范实验 (带实时 Epoch & Batch Loss 监控)")
+    print("Starting Comprehensive Video Model Tuning (Aligned Gradients)")
     print("=" * 90)
 
     for name in model_names:
-        print(f"\n>>> 正在调优模型: {name} <<<")
+        print(f"\n>>> Tuning Model: {name} <<<")
         temp_logs = []
 
         for lr in lr_list:
-            model = build_video_model(name, 3).to(DEVICE)
+            model = build_video_model(name, 3, resnet_weight_path).to(DEVICE)
             start_t = time.time()
 
             val_auc, best_wts = train_with_val(
                 model, train_loader, val_loader, MAX_EPOCHS, lr, WEIGHT_DECAY, PATIENCE, class_weights_tensor
             )
 
-            print(f"  [LR={lr}] 验证集最佳 AUC: {val_auc:.2f}% (耗时 {time.time() - start_t:.0f}s)")
+            print(f"  [LR={lr}] Best Val AUC: {val_auc:.2f}% (Time {time.time() - start_t:.0f}s)")
 
             temp_logs.append({
                 "Model": name,
@@ -315,20 +330,17 @@ def run_video_dl_experiments(train_records, val_records, test_records, class_wei
             torch.cuda.empty_cache()
             gc.collect()
 
-        # 选择最佳 LR
         best_log = max(temp_logs, key=lambda x: x["Val_AUC"])
-        print(f"[最优配置] {name} → Best LR: {best_log['Learning_Rate']}, Val AUC: {best_log['Val_AUC']:.2f}%")
+        print(f"[Optimal Config] {name} -> Best LR: {best_log['Learning_Rate']}, Val AUC: {best_log['Val_AUC']:.2f}%")
 
-        # 最终测试集评估（只做一次）
-        final_model = build_video_model(name, 3).to(DEVICE)
+        final_model = build_video_model(name, 3, resnet_weight_path).to(DEVICE)
         final_model.load_state_dict(best_log['Weights_Dict'])
         test_uar, test_war, test_auc = evaluate_on_test(final_model, test_loader)
-        print(f"[最终测试] AUC: {test_auc:.2f}% | UAR: {test_uar:.2f}% | WAR: {test_war:.2f}%\n")
+        print(f"[Final Test] AUC: {test_auc:.2f}% | UAR: {test_uar:.2f}% | WAR: {test_war:.2f}%\n")
 
         del final_model
         gc.collect()
 
-        # 记录结果
         for log in temp_logs:
             is_optimal = (log["Learning_Rate"] == best_log["Learning_Rate"])
             all_detailed_results.append({
@@ -341,12 +353,11 @@ def run_video_dl_experiments(train_records, val_records, test_records, class_wei
                 "Is_Optimal_Config": is_optimal
             })
 
-    # 输出表格和 LaTeX
     df_results = pd.DataFrame(all_detailed_results)
     df_optimal = df_results[df_results["Is_Optimal_Config"] == True]
 
     print("\n" + "=" * 70)
-    print("最终最优配置性能汇总表")
+    print("Final Optimal Configurations Performance")
     print("=" * 70)
     print(f"{'Model':<20} | {'Best LR':<10} | {'Test UAR (%)':<12} | {'Test WAR (%)':<12} | {'Test AUC (%)':<12}")
     print("-" * 80)
@@ -354,40 +365,43 @@ def run_video_dl_experiments(train_records, val_records, test_records, class_wei
         print(
             f"{row['Model']:<20} | {row['Learning_Rate']:<10.0e} | {row['Test_UAR']:>12.2f} | {row['Test_WAR']:>12.2f} | {row['Test_AUC']:>12.2f}")
 
-    # LaTeX
     latex_str = "\\begin{table}[htbp]\n\\centering\n\\begin{tabular}{lcccc}\n\\hline\n"
     latex_str += "\\textbf{Model} & \\textbf{Best LR} & \\textbf{Test UAR (\\%)} & \\textbf{Test WAR (\\%)} & \\textbf{Test AUC (\\%)} \\\\\n\\hline\n"
     for _, row in df_optimal.iterrows():
         latex_str += f"{row['Model']} & {row['Learning_Rate']:.0e} & {row['Test_UAR']:.2f} & {row['Test_WAR']:.2f} & {row['Test_AUC']:.2f} \\\\\n"
-    latex_str += "\\hline\n\\end{tabular}\n\\caption{Video Deep Models Performance (Proper Validation + Test Set)}\n\\label{tab:video_dl_proper}\n\\end{table}"
+    latex_str += "\\hline\n\\end{tabular}\n\\caption{Video Deep Models Performance}\n\\label{tab:video_dl_performance}\n\\end{table}"
 
     return df_results, latex_str
 
 
-# ==========================================
-# 主函数
-# ==========================================
 if __name__ == "__main__":
-    CSV_PATH = r"D:\Code\Project\Dataset\Official_Master_Split.csv"
-    DATASET_BASE_DIR = r"D:\Code\Project\Dataset\Full_wly"
-    OUTPUT_BASE_DIR = r"D:\Code\Project\Dataset\Single_modal_Performance\Single_video_DL"
+    parser = argparse.ArgumentParser(description="Comprehensive Video Deep Learning Pipeline")
+    parser.add_argument('--csv_path', type=str, required=True, help='Path to master split CSV file')
+    parser.add_argument('--data_dir', type=str, required=True, help='Base directory for video dataset')
+    parser.add_argument('--output_dir', type=str, default='./outputs/Single_video_DL', help='Directory to save outputs')
+    parser.add_argument('--resnet_weight', type=str, default=None,
+                        help='Path to local ResNet18 timm weights (optional)')
 
-    train_recs, val_recs, test_recs, class_wts = load_video_dataset_from_csv(CSV_PATH, DATASET_BASE_DIR)
+    args = parser.parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    train_recs, val_recs, test_recs, class_wts = load_video_dataset_from_csv(args.csv_path, args.data_dir)
 
     if len(train_recs) > 0 and len(test_recs) > 0 and len(val_recs) > 0:
-        df_results, latex_snippet = run_video_dl_experiments(train_recs, val_recs, test_recs, class_wts)
+        df_results, latex_snippet = run_video_dl_experiments(train_recs, val_recs, test_recs, class_wts,
+                                                             args.resnet_weight)
 
-        print("\n--- 供论文引用的 LaTeX 代码片段 ---")
+        print("\n--- LaTeX Table Snippet for Citation ---")
         print(latex_snippet)
 
         current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        full_save_path = os.path.join(OUTPUT_BASE_DIR, f"Video_Opt_Aligned_{current_time}")
+        full_save_path = os.path.join(args.output_dir, f"Video_Opt_Aligned_{current_time}")
         os.makedirs(full_save_path, exist_ok=True)
 
         df_results.to_csv(os.path.join(full_save_path, "detailed_grid_search_metrics.csv"), index=False)
         with open(os.path.join(full_save_path, "latex_table.txt"), 'w', encoding='utf-8') as f:
             f.write(latex_snippet)
 
-        print(f"\n[完成] 所有结果已保存至: {full_save_path}")
+        print(f"\n[Execution Complete] Results saved to: {full_save_path}")
     else:
-        print("[错误] 数据加载失败，请检查路径。")
+        print("[Error] Data loading failed. Please verify the paths.")

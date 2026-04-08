@@ -2,21 +2,22 @@ import os
 import time
 import datetime
 import copy
+import argparse
 import pandas as pd
 import numpy as np
 import warnings
 import gc
 
-# 引入 compute_class_weight 解决类别不平衡
+# Handle class imbalance
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import recall_score, roc_auc_score
 
 # ==========================================
-# 0. 环境与日志静音配置
+# 0. Environment & Logging Setup
 # ==========================================
 warnings.filterwarnings('ignore')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+# os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com' # Uncomment for mainland China users
 
 import torch
 import torch.nn as nn
@@ -31,7 +32,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 # ==========================================
-# 模块 1：定义深度学习模型库
+# Module 1: Deep Learning Model Definitions
 # ==========================================
 class TextCNN(nn.Module):
     def __init__(self, embedding_dim=768, num_classes=3, num_filters=100, filter_sizes=(3, 4, 5)):
@@ -78,10 +79,10 @@ class AttentionBiLSTM(nn.Module):
 
 
 # ==========================================
-# 模块 2：数据读取与特征预计算 (已适配三划分)
+# Module 2: Data Loading & Precomputation
 # ==========================================
 def load_text_dataset_from_csv(csv_path, base_dir, model_path, max_len=256):
-    print(f"\n[数据加载] 正在读取全局主划分名单: {csv_path}")
+    print(f"\n[Data Loading] Reading master split list: {csv_path}")
     df = pd.read_csv(csv_path)
 
     path_mapping = {}
@@ -123,20 +124,20 @@ def load_text_dataset_from_csv(csv_path, base_dir, model_path, max_len=256):
                     test_texts.append(text)
                     test_labels.append(label_idx)
 
-    print(f"[数据加载] 完毕！成功装载: 训练集 {len(train_texts)} | 验证集 {len(val_texts)} | 测试集 {len(test_texts)}")
+    print(f"[Data Loading] Done! Train: {len(train_texts)} | Val: {len(val_texts)} | Test: {len(test_texts)}")
 
-    # 计算类别权重 (用于处理数据不平衡)
+    # Calculate class weights for imbalanced dataset
     class_weights = compute_class_weight(
         class_weight='balanced',
         classes=np.unique(train_labels),
         y=train_labels
     )
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
-    print(f"[数据分布] 自动计算训练集损失权重 (HC/MCI/AD): {class_weights_tensor.cpu().numpy()}")
+    print(f"[Data Distribution] Automatically computed class weights (HC/MCI/AD): {class_weights_tensor.cpu().numpy()}")
 
     tokenizer = BertTokenizer.from_pretrained(model_path)
 
-    # 编码三个集合
+    # Encode splits
     train_enc = tokenizer(train_texts, padding=True, truncation=True, max_length=max_len, return_tensors='pt')
     val_enc = tokenizer(val_texts, padding=True, truncation=True, max_length=max_len, return_tensors='pt')
     test_enc = tokenizer(test_texts, padding=True, truncation=True, max_length=max_len, return_tensors='pt')
@@ -161,7 +162,7 @@ def precompute_embeddings(dataset, static_bert, batch_size=32):
 
 
 # ==========================================
-# 模块 3：模型训练与独立测试评估
+# Module 3: Training and Evaluation
 # ==========================================
 def evaluate_model(model, dataloader, is_finetune):
     model.eval()
@@ -193,7 +194,7 @@ def train_eval_single_fold(model, train_loader, val_loader, is_finetune, epochs,
                            class_weights_tensor):
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-    # 【注入类权重】
+    # Inject class weights
     criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
 
     best_val_auc = -1.0
@@ -206,7 +207,7 @@ def train_eval_single_fold(model, train_loader, val_loader, is_finetune, epochs,
             optimizer.zero_grad()
             if is_finetune:
                 input_ids, masks, labels = [b.to(DEVICE) for b in batch]
-                # Huggingface 默认 Loss 不带 class weights，所以我们手动计算
+                # HuggingFace default loss doesn't use class weights, so we compute it manually
                 logits = model(input_ids, attention_mask=masks).logits
                 loss = criterion(logits, labels)
             else:
@@ -233,13 +234,13 @@ def train_eval_single_fold(model, train_loader, val_loader, is_finetune, epochs,
 
 
 def run_text_dl_experiments(train_ds, val_ds, test_ds, class_weights_tensor, model_path):
-    print(f"\n[环境检查] 深度计算核心: {DEVICE.type.upper()}")
+    print(f"\n[Environment] Compute Device: {DEVICE.type.upper()}")
 
-    # 加载静态 BERT 进行特征预计算
+    # Load static BERT for feature precomputation
     static_bert = BertModel.from_pretrained(model_path).to(DEVICE)
     static_bert.eval()
 
-    print("\n[特征工程] 正在预计算静态 BERT 特征，请稍候...")
+    print("\n[Feature Engineering] Precomputing static BERT features, please wait...")
     train_emb_ds = precompute_embeddings(train_ds, static_bert)
     val_emb_ds = precompute_embeddings(val_ds, static_bert)
     test_emb_ds = precompute_embeddings(test_ds, static_bert)
@@ -247,7 +248,7 @@ def run_text_dl_experiments(train_ds, val_ds, test_ds, class_weights_tensor, mod
     del static_bert
     if torch.cuda.is_available(): torch.cuda.empty_cache()
 
-    # 构建 DataLoader
+    # Build DataLoaders
     train_loader_ft = DataLoader(train_ds, batch_size=16, shuffle=True)
     val_loader_ft = DataLoader(val_ds, batch_size=16, shuffle=False)
     test_loader_ft = DataLoader(test_ds, batch_size=16, shuffle=False)
@@ -264,15 +265,15 @@ def run_text_dl_experiments(train_ds, val_ds, test_ds, class_weights_tensor, mod
     all_detailed_results = []
 
     print("\n" + "=" * 70)
-    print("开始严谨调优 (每步表现计入CSV，仅最优模型接受测试集检验)")
+    print("Starting Rigorous Grid Search (Best model evaluated on blind test set)")
     print("=" * 70)
 
     for name in model_names:
-        print(f"\n>>> 调优模型: {name} <<<")
+        print(f"\n>>> Tuning Model: {name} <<<")
         is_ft = (name == "BERT Fine-tune")
         current_lr_list = lr_list_finetune if is_ft else lr_list_static
 
-        # 动态调整 Fine-tune 的 Epoch 和 Patience
+        # Dynamic epochs and patience mapping
         MAX_EPOCHS = 5 if is_ft else 30
         PATIENCE = 3 if is_ft else 7
 
@@ -282,7 +283,7 @@ def run_text_dl_experiments(train_ds, val_ds, test_ds, class_weights_tensor, mod
 
         temp_logs = []
 
-        # 1. 在验证集上寻找最佳学习率，并记录所有结果
+        # 1. Grid search for optimal learning rate on validation set
         for current_lr in current_lr_list:
             if name == "TextCNN":
                 model = TextCNN().to(DEVICE)
@@ -300,7 +301,7 @@ def run_text_dl_experiments(train_ds, val_ds, test_ds, class_weights_tensor, mod
                 weight_decay=WEIGHT_DECAY, patience=PATIENCE, class_weights_tensor=class_weights_tensor
             )
 
-            print(f"  [-] LR: {current_lr:<7} | 验证集 AUC: {val_auc:>6.2f}% (耗时: {time.time() - start_t:>2.0f}s)")
+            print(f"  [-] LR: {current_lr:<7} | Val AUC: {val_auc:>6.2f}% (Time: {time.time() - start_t:>2.0f}s)")
 
             temp_logs.append({
                 "Model": name,
@@ -313,13 +314,13 @@ def run_text_dl_experiments(train_ds, val_ds, test_ds, class_weights_tensor, mod
             if torch.cuda.is_available(): torch.cuda.empty_cache()
             gc.collect()
 
-        # 2. 找到当前模型表现最好的超参
+        # 2. Extract optimal hyperparameters
         best_log = max(temp_logs, key=lambda x: x["Val_AUC"])
         print(
-            f"[!] {name} 调优结束 -> 最优 LR: {best_log['Learning_Rate']} (验证集最高 AUC: {best_log['Val_AUC']:.2f}%)")
+            f"[!] {name} Tuning Complete -> Best LR: {best_log['Learning_Rate']} (Best Val AUC: {best_log['Val_AUC']:.2f}%)")
 
-        # 3. 【核心严谨性】仅用最优超参在独立测试集上进行终极验证
-        print(f"[*] 正在解锁盲测集，进行唯一一次终极测试...")
+        # 3. [Strict Academic Integrity] Only the best config gets evaluated on the blind test set
+        print(f"[*] Unlocking blind test set for final evaluation...")
         if name == "TextCNN":
             final_model = TextCNN().to(DEVICE)
         elif name == "BiLSTM":
@@ -331,12 +332,12 @@ def run_text_dl_experiments(train_ds, val_ds, test_ds, class_weights_tensor, mod
 
         final_model.load_state_dict(best_log['Weights_Dict'])
         test_uar, test_war, test_auc = evaluate_model(final_model, cur_test_loader, is_ft)
-        print(f"    --> 测试集终极表现: AUC {test_auc:.2f}% | UAR {test_uar:.2f}% | WAR {test_war:.2f}%\n")
+        print(f"    --> Final Test Performance: AUC {test_auc:.2f}% | UAR {test_uar:.2f}% | WAR {test_war:.2f}%\n")
 
         del final_model
         gc.collect()
 
-        # 4. 汇总当前模型的所有超参搜索记录，次优配置无权获取 Test 数据
+        # 4. Summarize tuning logs
         for log in temp_logs:
             is_optimal = (log["Learning_Rate"] == best_log["Learning_Rate"])
             all_detailed_results.append({
@@ -349,10 +350,10 @@ def run_text_dl_experiments(train_ds, val_ds, test_ds, class_weights_tensor, mod
                 "Is_Optimal_Config": is_optimal
             })
 
-    # 生成详细 DataFrame
+    # Generate detailed DataFrame
     df_results = pd.DataFrame(all_detailed_results)
 
-    # 生成供论文引用的 LaTeX (只筛选出 Is_Optimal_Config == True 的最终结果)
+    # Generate LaTeX code for paper citation (Optimal results only)
     df_optimal = df_results[df_results["Is_Optimal_Config"] == True]
 
     latex_str = "\\begin{table}[htbp]\n\\centering\n\\begin{tabular}{lcccc}\n\\hline\n"
@@ -365,38 +366,43 @@ def run_text_dl_experiments(train_ds, val_ds, test_ds, class_weights_tensor, mod
 
 
 # ==========================================
-# 模块 4：执行入口
+# Module 4: Execution Entry Point
 # ==========================================
 if __name__ == "__main__":
-    # 指向由你刚刚生成的绝对对齐名单
-    CSV_PATH = r"D:\Code\Project\Dataset\Official_Master_Split.csv"
-    DATASET_BASE_DIR = r"D:\Code\Project\Dataset\Full_wly"
-    OUTPUT_BASE_DIR = r"D:\Code\Project\Dataset\Single_modal_Performance\Single_text_DL"
-    MODEL_PATH = r"D:\Code\Project\Dataset\Models\bert-base-chinese"
+    parser = argparse.ArgumentParser(description="Text Modality Deep Learning Pipeline")
+    parser.add_argument('--csv_path', type=str, required=True, help='Path to the master split CSV file')
+    parser.add_argument('--data_dir', type=str, required=True, help='Base directory for the text dataset')
+    parser.add_argument('--output_dir', type=str, default='./outputs/Single_text_DL', help='Directory to save outputs')
+    parser.add_argument('--bert_path', type=str, default='bert-base-chinese',
+                        help='Path to local BERT weights or HuggingFace model name')
 
-    # 注意：接收新增的 class_weights_tensor
-    train_ds, val_ds, test_ds, class_wts = load_text_dataset_from_csv(CSV_PATH, DATASET_BASE_DIR, MODEL_PATH)
+    args = parser.parse_args()
+
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    train_ds, val_ds, test_ds, class_wts = load_text_dataset_from_csv(args.csv_path, args.data_dir, args.bert_path)
 
     if len(train_ds) > 0 and len(test_ds) > 0 and len(val_ds) > 0:
-        df_results, latex_snippet = run_text_dl_experiments(train_ds, val_ds, test_ds, class_wts, MODEL_PATH)
+        df_results, latex_snippet = run_text_dl_experiments(train_ds, val_ds, test_ds, class_wts, args.bert_path)
 
-        print("\n--- 供论文直接引用的 LaTeX 代码片段 (仅包含最优表现) ---")
+        print("\n--- LaTeX Table Snippet for Paper (Optimal Performance Only) ---")
         print(latex_snippet)
-        print("--------------------------------------------------\n")
+        print("----------------------------------------------------------------\n")
 
         current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        full_save_path = os.path.join(OUTPUT_BASE_DIR, f"Text_Opt_Aligned_{current_time}")
+        full_save_path = os.path.join(args.output_dir, f"Text_Opt_Aligned_{current_time}")
         os.makedirs(full_save_path, exist_ok=True)
 
-        # 保存带详细超参记录的完整 CSV
+        # Save detailed grid search metrics
         csv_save_path = os.path.join(full_save_path, "detailed_grid_search_metrics.csv")
         df_results.to_csv(csv_save_path, index=False)
 
-        # 保存精简版 LaTeX 表格
+        # Save simplified LaTeX table
         with open(os.path.join(full_save_path, "latex_table.txt"), 'w', encoding='utf-8') as f:
             f.write(latex_snippet)
 
-        print(f"\n[执行完毕] 优化结果已安全保存至: {full_save_path}")
-        print(f" -> 详细超参探索日志已保存为: detailed_grid_search_metrics.csv")
+        print(f"\n[Execution Complete] Optimization results saved to: {full_save_path}")
+        print(f" -> Detailed hyperparameter search logs saved as: detailed_grid_search_metrics.csv")
     else:
-        print("[终止] 数据集提取失败，请检查 CSV 文件内容或文本源目录。")
+        print("[Terminated] Dataset extraction failed. Please check the CSV file content or the text source directory.")

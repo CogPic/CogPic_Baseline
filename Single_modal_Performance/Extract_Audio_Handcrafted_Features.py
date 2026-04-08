@@ -1,4 +1,5 @@
 import os
+import argparse
 import pandas as pd
 import numpy as np
 import librosa
@@ -8,35 +9,29 @@ from scipy.stats import skew, kurtosis
 import warnings
 from tqdm import tqdm
 
-# 忽略常规的除以0或音频较短的警告
+# Ignore standard division by zero or short audio warnings
 warnings.filterwarnings('ignore')
-
-# ==========================================
-# 1. 核心路径配置
-# ==========================================
-CSV_PATH = r"D:\Code\Project\Dataset\Official_Master_Split.csv"
-OUTPUT_DIR = r"D:\Code\Project\Dataset\Offline_Features\Handcrafted_CSV"
-# 最终生成的结构化声学特征表
-OUTPUT_CSV_PATH = os.path.join(OUTPUT_DIR, "Audio_Acoustic_Features.csv")
 
 N_MFCC = 42
 MIN_SAMPLES_FOR_FFT = 2048
 
 
 # ==========================================
-# 2. 辅助函数：健壮的音频寻址与空特征生成
+# 1. Helper Functions
 # ==========================================
-def find_wav_robustly(task_dir):
-    """在任务文件夹中寻找 .wav 文件"""
-    if not os.path.exists(task_dir): return None
-    for file in os.listdir(task_dir):
-        if file.endswith('.wav'):
-            return os.path.join(task_dir, file)
-    return None
+def build_path_mapping(base_dir):
+    """Dynamically map Task_ID to .wav paths to avoid hardcoded CSV paths."""
+    mapping = {}
+    for root, _, files in os.walk(base_dir):
+        for file in files:
+            if file.endswith('.wav'):
+                task_id = os.path.basename(root)
+                mapping[task_id] = os.path.join(root, file)
+    return mapping
 
 
 def get_empty_acoustic_features():
-    """当音频损坏或太短时，返回全 0 的特征字典，保证列对齐"""
+    """Return a dictionary of zeros when audio is corrupted or too short."""
     feat = {
         'f0_mean': 0, 'f0_std': 0, 'f0_max': 0, 'f0_min': 0,
         'jitter_local': 0, 'shimmer_local': 0, 'hnr_mean': 0, 'intensity_mean': 0,
@@ -53,13 +48,13 @@ def get_empty_acoustic_features():
 
 
 # ==========================================
-# 3. 核心算法：声学特征提取引擎
+# 2. Core Algorithm: Feature Extraction Engine
 # ==========================================
 def extract_acoustic_features(audio_path):
     features = get_empty_acoustic_features()
     try:
         # ---------------------------------------------------------
-        # Part 1: Parselmouth (Praat) 物理声学特征
+        # Part 1: Parselmouth (Praat) Physical Acoustic Features
         # ---------------------------------------------------------
         snd = parselmouth.Sound(str(audio_path))
 
@@ -89,13 +84,13 @@ def extract_acoustic_features(audio_path):
         int_mean = praat_call(intensity, "Get mean", 0, 0, "energy")
         features['intensity_mean'] = int_mean if not np.isnan(int_mean) else 0
 
-        # 3. 共振峰 Formants
+        # 3. Formants
         formant = praat_call(snd, "To Formant (burg)", 0.0, 5.0, 5500, 0.025, 50)
         for i in range(1, 5):
             f_mean = praat_call(formant, "Get mean", i, 0, 0, "hertz")
             features[f'f{i}_mean'] = f_mean if not np.isnan(f_mean) else 0
 
-        # 4. 停顿分析 Pauses
+        # 4. Pauses Analysis
         textgrid = praat_call(snd, "To TextGrid (silences)", 100, 0, -25, 0.3, 0.1, "silent", "sounding")
         total_duration = praat_call(snd, "Get total duration")
 
@@ -116,7 +111,7 @@ def extract_acoustic_features(audio_path):
         features['avg_pause_duration'] = pause_duration / n_pauses if n_pauses > 0 else 0
 
         # ---------------------------------------------------------
-        # Part 2: Librosa MFCC 统计特征
+        # Part 2: Librosa MFCC Statistical Features
         # ---------------------------------------------------------
         y, sr = librosa.load(audio_path, sr=None)
         if len(y) >= MIN_SAMPLES_FOR_FFT:
@@ -137,36 +132,39 @@ def extract_acoustic_features(audio_path):
             features['mfcc_mean_vec_kurtosis'] = kurtosis(mfcc_mean_t, nan_policy='omit')
 
     except Exception as e:
-        pass  # 如果遇到任何声学提取引擎崩溃，直接跳过，返回默认的全 0 字典
+        pass  # Skip and return zeros if acoustic engine crashes
 
     return features
 
 
 # ==========================================
-# 4. 主流程：扫描与固化
+# 3. Main Execution
 # ==========================================
-def run_audio_handcrafted_extraction():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+def run_audio_handcrafted_extraction(args):
+    os.makedirs(args.output_dir, exist_ok=True)
+    output_csv_path = os.path.join(args.output_dir, "Audio_Acoustic_Features.csv")
 
     try:
-        master_df = pd.read_csv(CSV_PATH)
-        print(f"\n>>> [阶段 2-B (Track 2)] 成功加载官方主清单，共计 {len(master_df)} 个任务。")
+        master_df = pd.read_csv(args.csv_path)
+        print(f"\n>>> [Data Loading] Master split loaded successfully. Total tasks: {len(master_df)}.")
     except Exception as e:
-        print(f"[致命错误] 无法读取清单: {e}");
+        print(f"[Fatal Error] Failed to read CSV: {e}")
         return
 
+    # Build dynamic path mapping
+    path_mapping = build_path_mapping(args.data_dir)
     extracted_records = []
 
-    # 工业级进度条
-    pbar = tqdm(total=len(master_df), desc=" 临床声学特征提取中", unit="audio", ncols=100)
+    pbar = tqdm(total=len(master_df), desc="Extracting Acoustic Features", unit="audio", ncols=100)
 
-    for index, row in master_df.iterrows():
-        wav_path = find_wav_robustly(row['Task_Dir'])
+    for _, row in master_df.iterrows():
+        task_id = str(row['Task_ID']).strip()
+        wav_path = path_mapping.get(task_id)
 
-        # 基础元数据 (完美对齐)
+        # Baseline Metadata
         record = {
             'Subject_ID': row['Subject_ID'],
-            'Task_ID': row['Task_ID'],
+            'Task_ID': task_id,
             'Label_Str': row['Label_Str'],
             'Label_Idx': row['Label_Idx'],
             'Split': row['Split']
@@ -176,7 +174,6 @@ def run_audio_handcrafted_extraction():
             acou_features = extract_acoustic_features(wav_path)
             record.update(acou_features)
         else:
-            # 找不到文件补全0
             record.update(get_empty_acoustic_features())
 
         extracted_records.append(record)
@@ -184,14 +181,21 @@ def run_audio_handcrafted_extraction():
 
     pbar.close()
 
-    # 转换为 DataFrame 并填充可能遗漏的 NaN 为 0
+    # Convert to DataFrame and fill potential NaNs
     df_features = pd.DataFrame(extracted_records).fillna(0)
-    df_features.to_csv(OUTPUT_CSV_PATH, index=False, encoding='utf-8-sig')
+    df_features.to_csv(output_csv_path, index=False, encoding='utf-8-sig')
 
-    print(f"\n[大功告成] 音频专家手工特征库提取完毕！")
-    print(f"  -> 共生成了 {len(df_features)} 行，每行包含 180+ 维声学特征。")
-    print(f"  -> 结构化数据已安全保存至: {OUTPUT_CSV_PATH}")
+    print(f"\n[Success] Expert Handcrafted Audio Features extracted successfully!")
+    print(f"  -> Generated {len(df_features)} rows, each containing 180+ acoustic features.")
+    print(f"  -> Data safely saved to: {output_csv_path}")
 
 
 if __name__ == "__main__":
-    run_audio_handcrafted_extraction()
+    parser = argparse.ArgumentParser(description="Audio Acoustic Feature Extraction")
+    parser.add_argument('--csv_path', type=str, required=True, help='Path to master split CSV file')
+    parser.add_argument('--data_dir', type=str, required=True, help='Base directory for audio dataset')
+    parser.add_argument('--output_dir', type=str, default='./outputs/Handcrafted_CSV',
+                        help='Directory to save the generated CSV')
+
+    args = parser.parse_args()
+    run_audio_handcrafted_extraction(args)
