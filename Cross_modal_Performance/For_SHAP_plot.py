@@ -1,5 +1,6 @@
 import os
 import datetime
+import argparse
 import pandas as pd
 import numpy as np
 import xgboost as xgb
@@ -14,19 +15,11 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 1. 核心路径与学术排版配置
+# 1. Academic Formatting Configuration
 # ==========================================
-CSV_DIR = r"D:\Code\Project\Dataset\Offline_Features\Handcrafted_CSV"
-current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-OUTPUT_DIR = rf"D:\Code\Project\Dataset\Cross_modal_Performance\SHAP\{current_time}"
-
-TEXT_CSV = os.path.join(CSV_DIR, "Text_Linguistic_Features.csv")
-AUDIO_CSV = os.path.join(CSV_DIR, "Audio_Acoustic_Features.csv")
-VIDEO_CSV = os.path.join(CSV_DIR, "Video_Facial_Features.csv")
-
 META_COLS = ['Subject_ID', 'Task_ID', 'Label_Str', 'Label_Idx', 'Split']
 
-# 学术黑白灰排版风格 & Times New Roman
+# Academic black/white/gray styling & Times New Roman
 plt.rcParams['font.family'] = 'serif'
 plt.rcParams['font.serif'] = ['Times New Roman']
 plt.rcParams['axes.unicode_minus'] = False
@@ -37,10 +30,10 @@ plt.rcParams['ytick.color'] = 'black'
 
 
 # ==========================================
-# 2. 模态智能识别路由
+# 2. Modality Routing Intelligence
 # ==========================================
 def get_modality_category(feature_name):
-    """根据特征名称的关键字，自动判断其所属模态"""
+    """Automatically determine the modality based on feature name keywords."""
     video_prefixes = ('AU', 'gaze', 'pose')
     audio_prefixes = ('f0', 'f1', 'f2', 'f3', 'f4', 'jitter', 'shimmer', 'hnr',
                       'intensity', 'mfcc', 'pause', 'n_pauses', 'avg_pause')
@@ -53,14 +46,19 @@ def get_modality_category(feature_name):
 
 
 # ==========================================
-# 3. 数据加载与超级融合
+# 3. Data Loading and Super Fusion
 # ==========================================
-def load_and_merge_features():
-    print(f"\n[Phase 3] Starting multi-modal feature fusion (Text + Audio + Video)...")
-    df_text = pd.read_csv(TEXT_CSV)
-    df_audio = pd.read_csv(AUDIO_CSV)
-    df_video = pd.read_csv(VIDEO_CSV)
+def load_and_merge_features(text_csv, audio_csv, video_csv):
+    print(f"\n[Phase 1] Starting multi-modal feature fusion (Text + Audio + Video)...")
 
+    if not all(os.path.exists(p) for p in [text_csv, audio_csv, video_csv]):
+        raise FileNotFoundError("[Fatal Error] One or more input CSV files are missing. Please check your --csv_dir.")
+
+    df_text = pd.read_csv(text_csv)
+    df_audio = pd.read_csv(audio_csv)
+    df_video = pd.read_csv(video_csv)
+
+    # Inner join across all three modalities using the master meta columns
     df_merged = pd.merge(df_text, df_audio, on=META_COLS, how='inner')
     df_merged = pd.merge(df_merged, df_video, on=META_COLS, how='inner')
     df_merged = df_merged.fillna(0)
@@ -69,65 +67,80 @@ def load_and_merge_features():
           f"{df_merged.shape[1] - len(META_COLS)} features.")
     return df_merged
 
+
 # ==========================================
-# 4. 纯学术风格 SHAP 渲染引擎（紧凑排版优化版）
+# 4. Academic SHAP Visualization
 # ==========================================
-def draw_academic_shap_plot(shap_values_ad, X_test, model_name):
-    """绘制带有独立模态列的学术级英文 SHAP 蜂窝图 (紧凑版)"""
-    plt.figure(figsize=(11, 6))
+def draw_academic_shap_plot(shap_values_ad, X_test, model_name, output_dir):
+    """Generates an academic-grade SHAP beeswarm plot with distinct modality annotations."""
+
+    # Core parameter to control row height and compress vertical spacing
+    row_height = 0.18
+
+    # Slightly increase base height to accommodate compressed text
+    plt.figure(figsize=(6, 2.8))
 
     shap.summary_plot(
-        shap_values_ad, X_test, max_display=15, show=False, cmap='coolwarm'
+        shap_values_ad,
+        X_test,
+        max_display=20,
+        show=False,
+        cmap='coolwarm',
+        plot_size=row_height
     )
 
     ax = plt.gca()
+
+    # Retain custom label logic (Feature Name + Modality Annotation)
     labels = [t.get_text() for t in ax.get_yticklabels()]
     locs = ax.get_yticks()
-
     ax.set_yticklabels([])
 
-    plt.subplots_adjust(left=0.56)
+    # Adjust left margin to prevent text clipping
+    plt.subplots_adjust(left=0.58)
 
     for y, feature_name in zip(locs, labels):
         modality = get_modality_category(feature_name)
 
-        # 【修改 3】调整文字的 X 坐标与字号，适应新的紧凑画布
-        # 特征名（贴近左侧边缘）
-        ax.text(-0.70, y, feature_name,
+        # Feature name text
+        ax.text(-0.78, y, feature_name,
                 transform=ax.get_yaxis_transform(),
-                ha='left', va='center',
-                color='black', fontsize=11)  # 字号微调为 11 显得更精致
+                ha='left', va='center', color='black', fontsize=11.5)
 
-        # 模态标签（靠近纵轴，加大与特征名的区分度）
-        ax.text(-0.03, y, modality,
+        # Modality tag text
+        ax.text(-0.02, y, modality,
                 transform=ax.get_yaxis_transform(),
-                ha='right', va='center',
-                color='black', fontsize=11, fontweight='bold')
+                ha='right', va='center', color='black',
+                fontsize=12, fontweight='bold')
 
-    # 标题和坐标轴标签也适当调小一点，配合整体紧凑感
     plt.title(f"Global Feature Attribution for AD Prediction ({model_name})",
-              fontsize=14, pad=15, fontweight="bold")
-    plt.xlabel("SHAP value (impact on model output)", fontsize=12)
+              fontsize=15, pad=15, fontweight="bold")
+    plt.xlabel("SHAP value (impact on model output)", fontsize=13)
 
-    plot_path_png = os.path.join(
-        OUTPUT_DIR, f"SHAP_Academic_Beeswarm_{model_name.replace(' ', '_')}.png"
-    )
-    plot_path_pdf = os.path.join(
-        OUTPUT_DIR, f"SHAP_Academic_Beeswarm_{model_name.replace(' ', '_')}.pdf"
-    )
+    # Save outputs
+    plot_path_png = os.path.join(output_dir, f"SHAP_Academic_Beeswarm_{model_name.replace(' ', '_')}.png")
+    plot_path_pdf = os.path.join(output_dir, f"SHAP_Academic_Beeswarm_{model_name.replace(' ', '_')}.pdf")
 
     plt.savefig(plot_path_png, dpi=300, bbox_inches='tight')
     plt.savefig(plot_path_pdf, format='pdf', bbox_inches='tight')
     plt.close()
-    print(f" [Output] Saved SHAP plot for {model_name} (PNG & PDF).")
+
+    print(f" [Output] Saved compressed SHAP plot for {model_name}.")
 
 
 # ==========================================
-# 5. 主流程：5个模型对比 + 最优模型 SHAP（安全版，无猴子补丁）
+# 5. Main Execution: ML Comparison + SHAP
 # ==========================================
-def run_ml_and_shap():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    df_fused = load_and_merge_features()
+def run_ml_and_shap(args):
+    current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = os.path.join(args.output_dir, current_time)
+    os.makedirs(output_dir, exist_ok=True)
+
+    text_csv = os.path.join(args.csv_dir, "Text_Linguistic_Features.csv")
+    audio_csv = os.path.join(args.csv_dir, "Audio_Acoustic_Features.csv")
+    video_csv = os.path.join(args.csv_dir, "Video_Facial_Features.csv")
+
+    df_fused = load_and_merge_features(text_csv, audio_csv, video_csv)
 
     train_df = df_fused[df_fused['Split'] == 'Train'].reset_index(drop=True)
     test_df = df_fused[df_fused['Split'] == 'Test'].reset_index(drop=True)
@@ -137,18 +150,17 @@ def run_ml_and_shap():
     X_test = test_df.drop(columns=META_COLS)
     y_test = test_df['Label_Idx']
 
-    # ==================== 安全数据清洗（关键修复） ====================
+    # ==================== Safe Data Cleaning ====================
     print(" [Data Cleaning] Converting all features to pure float64...")
     X_train = X_train.apply(pd.to_numeric, errors='coerce').fillna(0).astype('float64')
     X_test = X_test.apply(pd.to_numeric, errors='coerce').fillna(0).astype('float64')
 
-    # 检查是否仍有非数值列（调试用）
     non_numeric = X_train.select_dtypes(exclude=['number']).columns.tolist()
     if non_numeric:
-        print(f" [Warning] Still has non-numeric columns: {non_numeric}")
+        print(f" [Warning] Non-numeric columns detected and coerced: {non_numeric}")
     # ============================================================
 
-    # 5个推荐模型
+    # 5 Recommended Classifiers
     models = {
         "Random Forest": RandomForestClassifier(
             n_estimators=200, max_depth=8, class_weight='balanced',
@@ -180,7 +192,7 @@ def run_ml_and_shap():
     best_uar = -1
     best_clf = None
 
-    print(f"\n[Model Evaluation] Training and evaluating 5 models...")
+    print(f"\n[Model Evaluation] Training and evaluating 5 ensemble models...")
 
     for model_name, clf in models.items():
         print(f"\n--- Evaluating {model_name} ---")
@@ -199,22 +211,22 @@ def run_ml_and_shap():
             best_model_name = model_name
             best_clf = clf
 
-    # 保存性能对比表格（用于论文 Table 1）
+    # Save performance comparison table (for Paper Table 1)
     results_df = pd.DataFrame(results)
     results_df = results_df.sort_values(by="UAR (%)", ascending=False)
-    results_path = os.path.join(OUTPUT_DIR, "Model_Performance_Comparison.csv")
+    results_path = os.path.join(output_dir, "Model_Performance_Comparison.csv")
     results_df.to_csv(results_path, index=False)
     print(f"\n[Output] Model performance table saved to: {results_path}")
-    print(f" [Best Model] {best_model_name} with UAR: {best_uar:.2f}%")
+    print(f" [Best Model] {best_model_name} achieved the highest UAR: {best_uar:.2f}%")
 
-    # ==================== 只在最优模型上运行 SHAP（安全版） ====================
-    print(f"\n[SHAP Analysis] Generating SHAP values for the best model: {best_model_name}...")
+    # ==================== Generate SHAP for Best Model ====================
+    print(f"\n[SHAP Analysis] Generating SHAP values for the top-performing model: {best_model_name}...")
 
     try:
         explainer = shap.TreeExplainer(best_clf)
         shap_values = explainer.shap_values(X_test, check_additivity=False)
 
-        # 多分类时取 AD 类（请根据你的 Label_Idx 确认索引，通常 AD 为 2）
+        # Extract AD class for multi-class classification (assuming AD is index 2)
         if isinstance(shap_values, list):
             shap_values_ad = shap_values[2]
         elif len(shap_values.shape) == 3:
@@ -222,19 +234,24 @@ def run_ml_and_shap():
         else:
             shap_values_ad = shap_values
 
-        draw_academic_shap_plot(shap_values_ad, X_test, best_model_name)
+        draw_academic_shap_plot(shap_values_ad, X_test, best_model_name, output_dir)
 
     except Exception as e:
         print(f" [SHAP Error] {type(e).__name__}: {e}")
-        print(
-            " [Tip] If error mentions '[0.5]' or similar, it may be XGBoost >= 3.0 compatibility issue with current SHAP.")
-        print("       Consider downgrading XGBoost to < 3.0 or updating SHAP to latest version.")
+        print(" [Tip] If error mentions '[0.5]' or similar, it may be an XGBoost >= 3.0 compatibility issue with SHAP.")
+        print("       Consider downgrading XGBoost to < 3.0 or updating SHAP to the latest version.")
         raise
 
-    print(f"\n[Process Complete] All outputs saved to: {OUTPUT_DIR}")
+    print(f"\n[Process Complete] All outputs saved to: {output_dir}")
     print(f"   - Performance table: Model_Performance_Comparison.csv")
     print(f"   - Best model SHAP plots (PNG + PDF)")
 
 
 if __name__ == "__main__":
-    run_ml_and_shap()
+    parser = argparse.ArgumentParser(description="Multimodal Feature Fusion and SHAP Explanation")
+    parser.add_argument('--csv_dir', type=str, required=True, help='Directory containing the handcrafted modality CSVs')
+    parser.add_argument('--output_dir', type=str, default='./outputs/SHAP_Results',
+                        help='Base directory to save evaluation metrics and plots')
+
+    args = parser.parse_args()
+    run_ml_and_shap(args)

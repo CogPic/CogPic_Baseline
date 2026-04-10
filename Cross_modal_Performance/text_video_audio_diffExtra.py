@@ -2,6 +2,7 @@ import os
 import time
 import datetime
 import copy
+import argparse
 import pandas as pd
 import numpy as np
 import warnings
@@ -13,11 +14,10 @@ from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import recall_score, roc_auc_score
 
 # ==========================================
-# 0. 环境警告与日志静音配置
+# 0. Environment & Logging Setup
 # ==========================================
 warnings.filterwarnings('ignore')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
 import torch
 import torch.nn as nn
@@ -37,22 +37,12 @@ hf_logging.set_verbosity_error()
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ==========================================
-# 本地模型绝对路径配置 (请确保配置正确)
-# ==========================================
-TIMM_RESNET18_PATH = r"D:\Code\Project\Dataset\Models\timm_resnet18\pytorch_model.bin"
-SERESNET50_WEIGHT_PATH = r"D:\Code\Project\Dataset\Models\seresnet50.ra2_in1k\pytorch_model.bin"
-BERT_PATH = r"D:\Code\Project\Dataset\Models\bert-base-chinese"
-CSV_PATH = r"D:\Code\Project\Dataset\Official_Master_Split.csv"
-DATASET_BASE_DIR = r"D:\Code\Project\Dataset\Full_wly"
-OUTPUT_BASE_DIR = r"D:\Code\Project\Dataset\Cross_modal_Performance\DL_Benchmark\Text_Video_Audio_diff"
-
 
 # ==========================================
-# 模块 1：三模态数据加载 (包含多任务感知)
+# Module 1: Tri-Modal Data Loading (Task-Aware)
 # ==========================================
 def load_trimodal_dataset_from_csv(csv_path, base_dir):
-    print(f"\n[阶段 1] 数据加载 -> 正在读取全局主划分名单: {csv_path}")
+    print(f"\n[Data Loading] Reading master split list: {csv_path}")
     df = pd.read_csv(csv_path)
 
     path_mapping = {}
@@ -102,7 +92,8 @@ def load_trimodal_dataset_from_csv(csv_path, base_dir):
             elif split_type == 'Test':
                 test_recs.append(record)
 
-    print(f"  -> 成功装载三模态配对数据: 训练集 {len(train_recs)} | 验证集 {len(val_recs)} | 测试集 {len(test_recs)}")
+    print(
+        f"  -> Successfully loaded tri-modal data: Train {len(train_recs)} | Val {len(val_recs)} | Test {len(test_recs)}")
     class_weights = compute_class_weight('balanced', classes=np.unique(train_labels), y=train_labels)
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
     return train_recs, val_recs, test_recs, class_weights_tensor
@@ -115,8 +106,8 @@ class TriModalAblationDataset(Dataset):
         self.max_txt_len = max_txt_len
 
         self.target_sr, self.target_samples = target_sr, int(target_sr * target_duration)
-        self.mel_transform = torchaudio.transforms.MelSpectrogram(sample_rate=target_sr, n_mels=224, n_fft=1024,
-                                                                  hop_length=512)
+        self.mel_transform = torchaudio.transforms.MelSpectrogram(
+            sample_rate=target_sr, n_mels=224, n_fft=1024, hop_length=512)
         self.db_transform = torchaudio.transforms.AmplitudeToDB()
         self.imagenet_normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
@@ -193,7 +184,7 @@ class TriModalAblationDataset(Dataset):
     def __getitem__(self, idx):
         record = self.data_records[idx]
         text = self._read_text(record['txt_path'])
-        encoded = self.tokenizer(text if text else "未知", padding='max_length', truncation=True,
+        encoded = self.tokenizer(text if text else "Unknown", padding='max_length', truncation=True,
                                  max_length=self.max_txt_len, return_tensors='pt')
         audio_tensor = self._process_audio(record['wav_path'])
         video_tensor = self._load_video(record['video_path'])
@@ -203,7 +194,7 @@ class TriModalAblationDataset(Dataset):
 
 
 # ==========================================
-# 模块 2：严谨的三模态骨干网络工厂
+# Module 2: Tri-Modal Backbone Factory
 # ==========================================
 class AttentionBiLSTM(nn.Module):
     def __init__(self, embed_dim=768, hidden_dim=128):
@@ -234,11 +225,15 @@ class AudioCRNN(nn.Module):
 
 
 class ResNetLSTM_Video(nn.Module):
-    def __init__(self, freeze_cnn=True):
+    def __init__(self, freeze_cnn=True, weight_path=None):
         super().__init__()
-        print(f"  -> [权重加载] 严格加载本地 ResNet18 (Video): {TIMM_RESNET18_PATH}")
-        if not os.path.exists(TIMM_RESNET18_PATH): raise FileNotFoundError("\n[致命错误] 本地视频预训练权重缺失！")
-        backbone = timm.create_model('resnet18', pretrained=False, num_classes=1000, checkpoint_path=TIMM_RESNET18_PATH)
+        if weight_path and os.path.exists(weight_path):
+            print(f"  -> [Weights] Loading local ResNet18 (Video): {weight_path}")
+            backbone = timm.create_model('resnet18', pretrained=False, num_classes=1000, checkpoint_path=weight_path)
+        else:
+            print("  -> [Weights] Downloading default ResNet18 from timm.")
+            backbone = timm.create_model('resnet18', pretrained=True, num_classes=1000)
+
         backbone.reset_classifier(0)
         self.cnn = backbone
         if freeze_cnn:
@@ -254,7 +249,8 @@ class ResNetLSTM_Video(nn.Module):
 
 
 class TriModalAblationFusionNet(nn.Module):
-    def __init__(self, text_model_name, audio_model_name, video_model_name, bert_path, num_classes=3):
+    def __init__(self, text_model_name, audio_model_name, video_model_name, bert_path, num_classes=3, resnet_path=None,
+                 seresnet_path=None):
         super().__init__()
         self.text_model_name, self.audio_model_name, self.video_model_name = text_model_name, audio_model_name, video_model_name
 
@@ -274,24 +270,27 @@ class TriModalAblationFusionNet(nn.Module):
             self.audio_encoder = AudioCRNN()
             audio_dim = 256
         elif audio_model_name == "ResNet18":
-            if not os.path.exists(TIMM_RESNET18_PATH): raise FileNotFoundError("\n[致命错误] 本地音频预训练权重缺失！")
-            self.audio_encoder = timm.create_model('resnet18', pretrained=False, num_classes=1000,
-                                                   checkpoint_path=TIMM_RESNET18_PATH)
+            if resnet_path and os.path.exists(resnet_path):
+                self.audio_encoder = timm.create_model('resnet18', pretrained=False, num_classes=1000,
+                                                       checkpoint_path=resnet_path)
+            else:
+                self.audio_encoder = timm.create_model('resnet18', pretrained=True, num_classes=1000)
             self.audio_encoder.reset_classifier(0)
             for param in self.audio_encoder.parameters(): param.requires_grad = False
             audio_dim = 512
         elif audio_model_name == "SEResNet50":
-            if not os.path.exists(SERESNET50_WEIGHT_PATH): raise FileNotFoundError(
-                "\n[致命错误] 本地音频预训练权重缺失！")
-            self.audio_encoder = timm.create_model('seresnet50.ra2_in1k', pretrained=False, num_classes=1000,
-                                                   checkpoint_path=SERESNET50_WEIGHT_PATH)
+            if seresnet_path and os.path.exists(seresnet_path):
+                self.audio_encoder = timm.create_model('seresnet50.ra2_in1k', pretrained=False, num_classes=1000,
+                                                       checkpoint_path=seresnet_path)
+            else:
+                self.audio_encoder = timm.create_model('seresnet50.ra2_in1k', pretrained=True, num_classes=1000)
             self.audio_encoder.reset_classifier(0)
             for param in self.audio_encoder.parameters(): param.requires_grad = False
             audio_dim = 2048
 
         # === 3. Video ===
         if video_model_name == "ResNet+LSTM":
-            self.video_encoder = ResNetLSTM_Video(freeze_cnn=True)
+            self.video_encoder = ResNetLSTM_Video(freeze_cnn=True, weight_path=resnet_path)
             video_dim = 512
         elif video_model_name == "R3D_18":
             self.video_encoder = video_models.r3d_18(pretrained=True)
@@ -322,7 +321,7 @@ class TriModalAblationFusionNet(nn.Module):
 
 
 # ==========================================
-# 模块 3：多任务感知评估引擎与训练循环 (全面加入 TQDM)
+# Module 3: Task-Aware Evaluation & Engine
 # ==========================================
 def safe_metrics(y_true, y_pred, y_prob):
     if len(y_true) == 0: return 0.0, 0.0, 0.0
@@ -414,7 +413,7 @@ def train_eval_single_fold(model, train_loader, val_loader, class_weights_tensor
             epochs_no_improve += 1
 
         if epochs_no_improve >= patience:
-            print(f"    -> [早停触发] Global AUC 连续 {patience} 轮无提升，终止当前 LR。")
+            print(f"    -> [Early Stopping] Global AUC showed no improvement for {patience} epochs. Terminating LR.")
             break
 
     model.load_state_dict(best_model_wts)
@@ -422,9 +421,9 @@ def train_eval_single_fold(model, train_loader, val_loader, class_weights_tensor
 
 
 # ==========================================
-# 模块 4：三模态架构消融大满贯主引擎
+# Module 4: Master Execution Engine
 # ==========================================
-def run_trimodal_backbone_ablation(tr_recs, val_recs, ts_recs, class_wts, bert_path):
+def run_trimodal_backbone_ablation(tr_recs, val_recs, ts_recs, class_wts, bert_path, resnet_path, seresnet_path):
     tokenizer = BertTokenizer.from_pretrained(bert_path)
     train_ds = TriModalAblationDataset(tr_recs, tokenizer)
     val_ds = TriModalAblationDataset(val_recs, tokenizer)
@@ -444,94 +443,81 @@ def run_trimodal_backbone_ablation(tr_recs, val_recs, ts_recs, class_wts, bert_p
     all_results = []
 
     print("\n" + "=" * 90)
-    print("开始 Text+Audio+Video 三模态架构消融大满贯 (包含全量多任务 15 列指标感知)")
+    print("Starting T+A+V Tri-Modal Ablation Study (With Multi-Task Perception)")
     print("=" * 90)
 
     for combo in combinations:
         t_name, a_name, v_name, paradigm = combo["text"], combo["audio"], combo["video"], combo["paradigm"]
-        print(f"\n>>> 正在验证三模态范式: {paradigm} <<<")
+        print(f"\n>>> Validating Paradigm: {paradigm} <<<")
         print(f"    [T]: {t_name} | [A]: {a_name} | [V]: {v_name}")
         temp_logs = []
 
         for lr in lr_list:
-            model = TriModalAblationFusionNet(t_name, a_name, v_name, bert_path).to(DEVICE)
+            model = TriModalAblationFusionNet(t_name, a_name, v_name, bert_path, resnet_path=resnet_path,
+                                              seresnet_path=seresnet_path).to(DEVICE)
             start_t = time.time()
 
             val_auc, best_wts = train_eval_single_fold(model, train_loader, val_loader, class_wts, lr, epochs=25,
                                                        patience=6, accumulation_steps=8)
-            print(f"  [-] LR: {lr:<7} | 验证集 Global AUC: {val_auc:>6.2f}% (总耗时: {time.time() - start_t:>2.0f}s)")
+            print(f"  [-] LR: {lr:<7} | Best Val Global AUC: {val_auc:>6.2f}% (Time: {time.time() - start_t:>2.0f}s)")
 
             temp_logs.append({
                 "Paradigm": paradigm, "Encoders": f"{t_name}+{a_name}+{v_name}",
                 "Learning_Rate": lr, "Val_Global_AUC": val_auc, "Weights_Dict": copy.deepcopy(best_wts)
             })
-            del model;
-            torch.cuda.empty_cache();
+            del model
+            torch.cuda.empty_cache()
             gc.collect()
 
         best_log = max(temp_logs, key=lambda x: x["Val_Global_AUC"])
-        print(f"[!] 最优架构定型 (最佳LR: {best_log['Learning_Rate']})，执行测试集多通道盲测...")
+        print(f"[!] Optimal configuration acquired (Best LR: {best_log['Learning_Rate']}). Unlocking blind test set...")
 
-        final_model = TriModalAblationFusionNet(t_name, a_name, v_name, bert_path).to(DEVICE)
+        final_model = TriModalAblationFusionNet(t_name, a_name, v_name, bert_path, resnet_path=resnet_path,
+                                                seresnet_path=seresnet_path).to(DEVICE)
         final_model.load_state_dict(best_log['Weights_Dict'])
         test_res = evaluate_multitask_model(final_model, test_loader, desc="Final Blind Testing")
 
         g_res = test_res["Global"]
-        print(f"    --> 全局终极表现: AUC {g_res['AUC']:.2f}% | UAR {g_res['UAR']:.2f}% | WAR {g_res['WAR']:.2f}%")
+        print(
+            f"    --> Final Global Performance: AUC {g_res['AUC']:.2f}% | UAR {g_res['UAR']:.2f}% | WAR {g_res['WAR']:.2f}%")
 
-        # 【核心修改点】：绑定所有 12 个测试指标到 best_log，绝对隔离作用域
         best_log.update({
-            "Test_Global_UAR": test_res["Global"]["UAR"],
-            "Test_Global_WAR": test_res["Global"]["WAR"],
+            "Test_Global_UAR": test_res["Global"]["UAR"], "Test_Global_WAR": test_res["Global"]["WAR"],
             "Test_Global_AUC": test_res["Global"]["AUC"],
-
-            "Test_Pic1_UAR": test_res["Pic 1"]["UAR"],
-            "Test_Pic1_WAR": test_res["Pic 1"]["WAR"],
+            "Test_Pic1_UAR": test_res["Pic 1"]["UAR"], "Test_Pic1_WAR": test_res["Pic 1"]["WAR"],
             "Test_Pic1_AUC": test_res["Pic 1"]["AUC"],
-
-            "Test_Pic2_UAR": test_res["Pic 2"]["UAR"],
-            "Test_Pic2_WAR": test_res["Pic 2"]["WAR"],
+            "Test_Pic2_UAR": test_res["Pic 2"]["UAR"], "Test_Pic2_WAR": test_res["Pic 2"]["WAR"],
             "Test_Pic2_AUC": test_res["Pic 2"]["AUC"],
-
-            "Test_Pic3_UAR": test_res["Pic 3"]["UAR"],
-            "Test_Pic3_WAR": test_res["Pic 3"]["WAR"],
+            "Test_Pic3_UAR": test_res["Pic 3"]["UAR"], "Test_Pic3_WAR": test_res["Pic 3"]["WAR"],
             "Test_Pic3_AUC": test_res["Pic 3"]["AUC"]
         })
 
-        del final_model;
+        del final_model
         gc.collect()
 
         for log in temp_logs:
             is_op = (log["Learning_Rate"] == best_log["Learning_Rate"])
             all_results.append({
-                "Paradigm": log["Paradigm"],
-                "Encoders": log["Encoders"],
-                "Learning_Rate": log["Learning_Rate"],
+                "Paradigm": log["Paradigm"], "Encoders": log["Encoders"], "Learning_Rate": log["Learning_Rate"],
                 "Val_Global_AUC": log["Val_Global_AUC"],
-
                 "Test_Global_UAR": log.get("Test_Global_UAR") if is_op else None,
                 "Test_Global_WAR": log.get("Test_Global_WAR") if is_op else None,
                 "Test_Global_AUC": log.get("Test_Global_AUC") if is_op else None,
-
                 "Test_Pic1_UAR": log.get("Test_Pic1_UAR") if is_op else None,
                 "Test_Pic1_WAR": log.get("Test_Pic1_WAR") if is_op else None,
                 "Test_Pic1_AUC": log.get("Test_Pic1_AUC") if is_op else None,
-
                 "Test_Pic2_UAR": log.get("Test_Pic2_UAR") if is_op else None,
                 "Test_Pic2_WAR": log.get("Test_Pic2_WAR") if is_op else None,
                 "Test_Pic2_AUC": log.get("Test_Pic2_AUC") if is_op else None,
-
                 "Test_Pic3_UAR": log.get("Test_Pic3_UAR") if is_op else None,
                 "Test_Pic3_WAR": log.get("Test_Pic3_WAR") if is_op else None,
                 "Test_Pic3_AUC": log.get("Test_Pic3_AUC") if is_op else None,
-
                 "Is_Optimal": is_op
             })
 
     df_results = pd.DataFrame(all_results)
     df_optimal = df_results[df_results["Is_Optimal"] == True]
 
-    # ================= 输出 15 列航母级 LaTeX 表格 =================
     latex_str = "\\begin{table*}[htbp]\n\\centering\n\\resizebox{\\textwidth}{!}{\n\\begin{tabular}{lll ccc ccc ccc ccc}\n\\toprule\n"
     latex_str += "\\multirow{2}{*}{\\textbf{Paradigm}} & \\multirow{2}{*}{\\textbf{Encoders (T+A+V)}} & \\multirow{2}{*}{\\textbf{Best LR}} & \\multicolumn{3}{c}{\\textbf{Global}} & \\multicolumn{3}{c}{\\textbf{Pic. 1}} & \\multicolumn{3}{c}{\\textbf{Pic. 2}} & \\multicolumn{3}{c}{\\textbf{Pic. 3}} \\\\\n"
     latex_str += "\\cmidrule(lr){4-6} \\cmidrule(lr){7-9} \\cmidrule(lr){10-12} \\cmidrule(lr){13-15}\n"
@@ -544,24 +530,36 @@ def run_trimodal_backbone_ablation(tr_recs, val_recs, ts_recs, class_wts, bert_p
         latex_str += f"{row['Test_Pic2_UAR']:.2f} & {row['Test_Pic2_WAR']:.2f} & {row['Test_Pic2_AUC']:.2f} & "
         latex_str += f"{row['Test_Pic3_UAR']:.2f} & {row['Test_Pic3_WAR']:.2f} & {row['Test_Pic3_AUC']:.2f} \\\\\n"
 
-    latex_str += "\\bottomrule\n\\end{tabular}\n}\n\\caption{Ablation Study of Tri-Modal Encoders Across Different Picture Tasks (Fixed Concat-MLP)}\n\\label{tab:trimodal_backbone_ablation}\n\\end{table*}"
+    latex_str += "\\bottomrule\n\\end{tabular}\n}\n\\caption{Ablation Study of Tri-Modal Encoders Across Different Picture Tasks}\n\\label{tab:trimodal_backbone_ablation}\n\\end{table*}"
 
     return df_results, latex_str
 
 
 if __name__ == "__main__":
-    if len(os.listdir(DATASET_BASE_DIR)) > 0:
-        tr_recs, val_recs, ts_recs, class_wts = load_trimodal_dataset_from_csv(CSV_PATH, DATASET_BASE_DIR)
+    parser = argparse.ArgumentParser(description="Tri-Modal Baseline Ablation Pipeline")
+    parser.add_argument('--csv_path', type=str, required=True, help='Path to master split CSV file')
+    parser.add_argument('--data_dir', type=str, required=True, help='Base directory for dataset')
+    parser.add_argument('--output_dir', type=str, default='./outputs/Cross_modal/TriModal_Baselines',
+                        help='Output directory')
+    parser.add_argument('--bert_path', type=str, default='bert-base-chinese', help='Path to BERT model')
+    parser.add_argument('--resnet_path', type=str, default=None, help='Local path for ResNet18 weights (optional)')
+    parser.add_argument('--seresnet_path', type=str, default=None, help='Local path for SEResNet50 weights (optional)')
+
+    args = parser.parse_args()
+
+    if len(os.listdir(args.data_dir)) > 0:
+        tr_recs, val_recs, ts_recs, class_wts = load_trimodal_dataset_from_csv(args.csv_path, args.data_dir)
 
         if len(tr_recs) > 0:
-            df_results, latex_snippet = run_trimodal_backbone_ablation(tr_recs, val_recs, ts_recs, class_wts, BERT_PATH)
+            df_results, latex_snippet = run_trimodal_backbone_ablation(
+                tr_recs, val_recs, ts_recs, class_wts, args.bert_path, args.resnet_path, args.seresnet_path)
 
-            print("\n--- 供论文引用的 15列超宽三模态多任务感知消融表 ---")
+            print("\n--- LaTeX Table Snippet for Citation ---")
             print(latex_snippet)
 
             current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            os.makedirs(OUTPUT_BASE_DIR, exist_ok=True)
-            df_results.to_csv(os.path.join(OUTPUT_BASE_DIR, f"TriModal_Ablation_Results_{current_time}.csv"),
+            os.makedirs(args.output_dir, exist_ok=True)
+            df_results.to_csv(os.path.join(args.output_dir, f"TriModal_Ablation_Results_{current_time}.csv"),
                               index=False)
-            with open(os.path.join(OUTPUT_BASE_DIR, f"latex_table_{current_time}.txt"), 'w', encoding='utf-8') as f:
+            with open(os.path.join(args.output_dir, f"latex_table_{current_time}.txt"), 'w', encoding='utf-8') as f:
                 f.write(latex_snippet)

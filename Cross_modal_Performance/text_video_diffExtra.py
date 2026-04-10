@@ -2,26 +2,26 @@ import os
 import time
 import datetime
 import copy
+import argparse
 import pandas as pd
 import numpy as np
 import warnings
 import gc
 from PIL import Image
-from tqdm import tqdm  # 【新增】：引入强大的进度条库
+from tqdm import tqdm
 
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import recall_score, roc_auc_score
 
 # ==========================================
-# 0. 环境警告与日志静音配置
+# 0. Environment & Logging Setup
 # ==========================================
 warnings.filterwarnings('ignore')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+# os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com' # Uncomment for mainland China users
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 import torchvision.models.video as video_models
 import timm
@@ -34,21 +34,12 @@ hf_logging.set_verbosity_error()
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ==========================================
-# 本地模型绝对路径配置 (请确保路径正确)
-# ==========================================
-TIMM_RESNET18_PATH = r"D:\Code\Project\Dataset\Models\timm_resnet18\pytorch_model.bin"
-BERT_PATH = r"D:\Code\Project\Dataset\Models\bert-base-chinese"
-CSV_PATH = r"D:\Code\Project\Dataset\Official_Master_Split.csv"
-DATASET_BASE_DIR = r"D:\Code\Project\Dataset\Full_wly"
-OUTPUT_BASE_DIR = r"D:\Code\Project\Dataset\Cross_modal_Performance\DL_Benchmark\Text_Video_diff"
-
 
 # ==========================================
-# 模块 1：严格对齐的文本-视频数据加载
+# Module 1: Strictly Aligned Data Loading
 # ==========================================
 def load_aligned_video_text_dataset_from_csv(csv_path, base_dir):
-    print(f"\n[阶段 1] 数据加载 -> 正在读取全局主划分名单: {csv_path}")
+    print(f"\n[Data Loading] Reading master split list: {csv_path}")
     df = pd.read_csv(csv_path)
 
     path_mapping = {}
@@ -86,7 +77,8 @@ def load_aligned_video_text_dataset_from_csv(csv_path, base_dir):
             elif split_type == 'Test':
                 test_recs.append(record)
 
-    print(f"  -> 成功装载双模态配对数据: 训练集 {len(train_recs)} | 验证集 {len(val_recs)} | 测试集 {len(test_recs)}")
+    print(
+        f"  -> Successfully loaded paired bimodal data: Train {len(train_recs)} | Val {len(val_recs)} | Test {len(test_recs)}")
     class_weights = compute_class_weight('balanced', classes=np.unique(train_labels), y=train_labels)
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
     return train_recs, val_recs, test_recs, class_weights_tensor
@@ -149,14 +141,14 @@ class TextVideoAblationDataset(Dataset):
     def __getitem__(self, idx):
         record = self.data_records[idx]
         text = self._read_text(record['txt_path'])
-        encoded = self.tokenizer(text if text else "未知", padding='max_length', truncation=True,
+        encoded = self.tokenizer(text if text else "Unknown", padding='max_length', truncation=True,
                                  max_length=self.max_txt_len, return_tensors='pt')
         video_tensor = self._load_video(record['video_path'])
         return encoded['input_ids'].squeeze(0), encoded['attention_mask'].squeeze(0), video_tensor, record['label']
 
 
 # ==========================================
-# 模块 2：动态时空骨干网络工厂
+# Module 2: Dynamic Spatiotemporal Backbone Factory
 # ==========================================
 class AttentionBiLSTM(nn.Module):
     def __init__(self, embed_dim=768, hidden_dim=128):
@@ -172,17 +164,14 @@ class AttentionBiLSTM(nn.Module):
 
 
 class ResNetLSTM_Video(nn.Module):
-    def __init__(self, freeze_cnn=True):
+    def __init__(self, freeze_cnn=True, weight_path=None):
         super().__init__()
-        if not os.path.exists(TIMM_RESNET18_PATH):
-            raise FileNotFoundError(f"\n[致命错误] 未找到本地预训练权重: {TIMM_RESNET18_PATH}")
 
-        backbone = timm.create_model(
-            'resnet18',
-            pretrained=False,
-            num_classes=1000,
-            checkpoint_path=TIMM_RESNET18_PATH
-        )
+        if weight_path and os.path.exists(weight_path):
+            backbone = timm.create_model('resnet18', pretrained=False, num_classes=1000, checkpoint_path=weight_path)
+        else:
+            backbone = timm.create_model('resnet18', pretrained=True, num_classes=1000)
+
         backbone.reset_classifier(0)
         self.cnn = backbone
 
@@ -201,7 +190,7 @@ class ResNetLSTM_Video(nn.Module):
 
 
 class VideoTextAblationFusionNet(nn.Module):
-    def __init__(self, text_model_name, video_model_name, bert_path, num_classes=3):
+    def __init__(self, text_model_name, video_model_name, bert_path, num_classes=3, resnet_weight=None):
         super().__init__()
         self.text_model_name = text_model_name
         self.video_model_name = video_model_name
@@ -209,7 +198,7 @@ class VideoTextAblationFusionNet(nn.Module):
         self.frozen_bert = BertModel.from_pretrained(bert_path)
         for param in self.frozen_bert.parameters(): param.requires_grad = False
 
-        # --- Text 编码器池 ---
+        # --- Text Encoder Pool ---
         if text_model_name == "Att-BiLSTM":
             self.text_aggregator = AttentionBiLSTM(embed_dim=768, hidden_dim=128)
             text_dim = 256
@@ -217,9 +206,9 @@ class VideoTextAblationFusionNet(nn.Module):
             self.text_aggregator = nn.Identity()
             text_dim = 768
 
-        # --- Video 时空编码器池 ---
+        # --- Video Spatiotemporal Encoder Pool ---
         if video_model_name == "ResNet+LSTM":
-            self.video_encoder = ResNetLSTM_Video(freeze_cnn=True)
+            self.video_encoder = ResNetLSTM_Video(freeze_cnn=True, weight_path=resnet_weight)
             video_dim = 512
         elif video_model_name == "R3D_18":
             self.video_encoder = video_models.r3d_18(pretrained=True)
@@ -232,7 +221,7 @@ class VideoTextAblationFusionNet(nn.Module):
             for param in self.video_encoder.parameters(): param.requires_grad = False
             video_dim = 512
 
-        # --- 固定的基准特征融合层 (Concat-MLP) ---
+        # --- Base Feature Fusion Layer (Concat-MLP) ---
         self.classifier = nn.Sequential(
             nn.Linear(text_dim + video_dim, 256),
             nn.BatchNorm1d(256),
@@ -260,7 +249,7 @@ class VideoTextAblationFusionNet(nn.Module):
 
 
 # ==========================================
-# 模块 3：OOM 防御训练引擎与进度条监控
+# Module 3: Anti-OOM Training Engine
 # ==========================================
 def evaluate_model(model, dataloader):
     model.eval()
@@ -298,7 +287,6 @@ def train_eval_single_fold(model, train_loader, val_loader, class_weights_tensor
         model.train()
         optimizer.zero_grad(set_to_none=True)
 
-        # 【新增】：使用 tqdm 包装训练加载器，显示当前 LR 和 Epoch，并设置 leave=False 保持控制台整洁
         pbar = tqdm(train_loader, desc=f"LR: {lr:<7} | Epoch {epoch + 1}/{epochs}", leave=False, ncols=100)
 
         for i, (ids, masks, videos, labels) in enumerate(pbar):
@@ -306,18 +294,15 @@ def train_eval_single_fold(model, train_loader, val_loader, class_weights_tensor
 
             with torch.amp.autocast('cuda'):
                 outputs = model(ids, masks, videos)
-                # 损失值等比例缩放，抵消 batch_size 缩小的影响
                 loss = criterion(outputs, labels) / accumulation_steps
 
             scaler.scale(loss).backward()
 
-            # 满足步数或到达 epoch 末尾时才执行一次真正的参数更新
             if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_loader):
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
 
-            # 【新增】：在进度条后缀动态刷新真实 Loss
             pbar.set_postfix({'loss': f"{loss.item() * accumulation_steps:.4f}"})
 
         _, _, val_auc = evaluate_model(model, val_loader)
@@ -330,8 +315,7 @@ def train_eval_single_fold(model, train_loader, val_loader, class_weights_tensor
             epochs_no_improve += 1
 
         if epochs_no_improve >= patience:
-            # 【新增】：明确提醒为何跳出当前 LR 的训练
-            print(f"    -> [早停机制触发] 验证集连续 {patience} 轮无提升，提前结束该学习率的训练。")
+            print(f"    -> [Early Stopping] Validation set showed no improvement for {patience} consecutive epochs.")
             break
 
     model.load_state_dict(best_model_wts)
@@ -339,9 +323,9 @@ def train_eval_single_fold(model, train_loader, val_loader, class_weights_tensor
 
 
 # ==========================================
-# 模块 4：执行时空架构消融大满贯
+# Module 4: Execute Spatiotemporal Ablation
 # ==========================================
-def run_video_backbone_ablation(tr_recs, val_recs, ts_recs, class_wts, bert_path):
+def run_video_backbone_ablation(tr_recs, val_recs, ts_recs, class_wts, bert_path, resnet_weight):
     tokenizer = BertTokenizer.from_pretrained(bert_path)
     train_ds = TextVideoAblationDataset(tr_recs, tokenizer)
     val_ds = TextVideoAblationDataset(val_recs, tokenizer)
@@ -361,16 +345,16 @@ def run_video_backbone_ablation(tr_recs, val_recs, ts_recs, class_wts, bert_path
     all_results = []
 
     print("\n" + "=" * 80)
-    print("开始 Text+Video 时空特征提取消融实验 (探讨 2D时序 vs 联合3D 架构收益)")
+    print("Starting Text+Video Spatiotemporal Encoder Ablation Study")
     print("=" * 80)
 
     for combo in combinations:
         t_name, v_name, paradigm = combo["text"], combo["video"], combo["paradigm"]
-        print(f"\n>>> 正在验证范式: {paradigm} ({t_name} + {v_name}) <<<")
+        print(f"\n>>> Validating Paradigm: {paradigm} ({t_name} + {v_name}) <<<")
         temp_logs = []
 
         for lr in lr_list:
-            model = VideoTextAblationFusionNet(t_name, v_name, bert_path).to(DEVICE)
+            model = VideoTextAblationFusionNet(t_name, v_name, bert_path, resnet_weight=resnet_weight).to(DEVICE)
             start_t = time.time()
 
             val_auc, best_wts = train_eval_single_fold(
@@ -378,30 +362,30 @@ def run_video_backbone_ablation(tr_recs, val_recs, ts_recs, class_wts, bert_path
                 epochs=25, patience=6, accumulation_steps=8
             )
 
-            # 进度条结束后，打印该 LR 的最终战果
-            print(f"  [-] LR: {lr:<7} | 验证集最佳 AUC: {val_auc:>6.2f}% (总耗时: {time.time() - start_t:>2.0f}s)")
+            print(f"  [-] LR: {lr:<7} | Best Val AUC: {val_auc:>6.2f}% (Time: {time.time() - start_t:>2.0f}s)")
 
             temp_logs.append({
                 "Paradigm": paradigm, "Text_Encoder": t_name, "Video_Encoder": v_name,
                 "Learning_Rate": lr, "Val_AUC": val_auc, "Weights_Dict": copy.deepcopy(best_wts)
             })
-            del model;
-            torch.cuda.empty_cache();
+            del model
+            torch.cuda.empty_cache()
             gc.collect()
 
         best_log = max(temp_logs, key=lambda x: x["Val_AUC"])
-        print(f"[!] {paradigm} 最优网络结构定型 (最佳LR: {best_log['Learning_Rate']})，即将执行测试集盲测...")
+        print(
+            f"[!] Optimal configuration acquired for {paradigm} (Best LR: {best_log['Learning_Rate']}). Unlocking test set...")
 
-        final_model = VideoTextAblationFusionNet(t_name, v_name, bert_path).to(DEVICE)
+        final_model = VideoTextAblationFusionNet(t_name, v_name, bert_path, resnet_weight=resnet_weight).to(DEVICE)
         final_model.load_state_dict(best_log['Weights_Dict'])
         test_uar, test_war, test_auc = evaluate_model(final_model, test_loader)
-        print(f"    --> 测试集终极表现: AUC {test_auc:.2f}% | UAR {test_uar:.2f}% | WAR {test_war:.2f}%")
+        print(f"    --> Final Test Performance: AUC {test_auc:.2f}% | UAR {test_uar:.2f}% | WAR {test_war:.2f}%")
 
         best_log["Test_UAR"] = test_uar
         best_log["Test_WAR"] = test_war
         best_log["Test_AUC"] = test_auc
 
-        del final_model;
+        del final_model
         gc.collect()
 
         for log in temp_logs:
@@ -428,17 +412,29 @@ def run_video_backbone_ablation(tr_recs, val_recs, ts_recs, class_wts, bert_path
 
 
 if __name__ == "__main__":
-    if len(os.listdir(DATASET_BASE_DIR)) > 0:
-        tr_recs, val_recs, ts_recs, class_wts = load_aligned_video_text_dataset_from_csv(CSV_PATH, DATASET_BASE_DIR)
+    parser = argparse.ArgumentParser(description="Text-Video Spatiotemporal Ablation Experiments")
+    parser.add_argument('--csv_path', type=str, required=True, help='Path to master split CSV file')
+    parser.add_argument('--data_dir', type=str, required=True, help='Base directory for dataset')
+    parser.add_argument('--output_dir', type=str, default='./outputs/DL_Benchmark/Text_Video_diff',
+                        help='Output directory')
+    parser.add_argument('--bert_path', type=str, default='bert-base-chinese', help='Path to BERT model')
+    parser.add_argument('--resnet_weight', type=str, default=None,
+                        help='Path to local ResNet18 timm weights (optional)')
+
+    args = parser.parse_args()
+
+    if len(os.listdir(args.data_dir)) > 0:
+        tr_recs, val_recs, ts_recs, class_wts = load_aligned_video_text_dataset_from_csv(args.csv_path, args.data_dir)
 
         if len(tr_recs) > 0:
-            df_results, latex_snippet = run_video_backbone_ablation(tr_recs, val_recs, ts_recs, class_wts, BERT_PATH)
+            df_results, latex_snippet = run_video_backbone_ablation(tr_recs, val_recs, ts_recs, class_wts,
+                                                                    args.bert_path, args.resnet_weight)
 
-            print("\n--- 供论文引用的 时空架构敏感性消融表 ---")
+            print("\n--- LaTeX Table Snippet for Spatiotemporal Ablation ---")
             print(latex_snippet)
 
             current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            os.makedirs(OUTPUT_BASE_DIR, exist_ok=True)
-            df_results.to_csv(os.path.join(OUTPUT_BASE_DIR, f"Video_Ablation_Results_{current_time}.csv"), index=False)
-            with open(os.path.join(OUTPUT_BASE_DIR, f"latex_table_{current_time}.txt"), 'w', encoding='utf-8') as f:
+            os.makedirs(args.output_dir, exist_ok=True)
+            df_results.to_csv(os.path.join(args.output_dir, f"Video_Ablation_Results_{current_time}.csv"), index=False)
+            with open(os.path.join(args.output_dir, f"latex_table_{current_time}.txt"), 'w', encoding='utf-8') as f:
                 f.write(latex_snippet)

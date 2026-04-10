@@ -2,6 +2,7 @@ import os
 import time
 import datetime
 import copy
+import argparse
 import pandas as pd
 import numpy as np
 import warnings
@@ -13,11 +14,10 @@ from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import recall_score, roc_auc_score
 
 # ==========================================
-# 0. 环境警告与日志静音配置
+# 0. Environment & Logging Setup
 # ==========================================
 warnings.filterwarnings('ignore')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
 import torch
 import torch.nn as nn
@@ -37,22 +37,12 @@ hf_logging.set_verbosity_error()
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ==========================================
-# 本地模型绝对路径配置 (请确保配置正确)
-# ==========================================
-SERESNET50_WEIGHT_PATH = r"D:\Code\Project\Dataset\Models\seresnet50.ra2_in1k\pytorch_model.bin"
-BERT_PATH = r"D:\Code\Project\Dataset\Models\bert-base-chinese"
-CSV_PATH = r"D:\Code\Project\Dataset\Official_Master_Split.csv"
-DATASET_BASE_DIR = r"D:\Code\Project\Dataset\Full_wly"
-# 输出目录已更改为专属融合实验目录
-OUTPUT_BASE_DIR = r"D:\Code\Project\Dataset\Cross_modal_Performance\DL_Benchmark\Text_Video_Audio_diff\TextCNN_MC3_SEResNet_Fusion"
-
 
 # ==========================================
-# 模块 1：三模态数据加载 (包含多任务感知)
+# Module 1: Tri-Modal Data Loading
 # ==========================================
 def load_trimodal_dataset_from_csv(csv_path, base_dir):
-    print(f"\n[阶段 1] 数据加载 -> 正在读取全局主划分名单: {csv_path}")
+    print(f"\n[Data Loading] Reading master split list: {csv_path}")
     df = pd.read_csv(csv_path)
 
     path_mapping = {}
@@ -102,7 +92,8 @@ def load_trimodal_dataset_from_csv(csv_path, base_dir):
             elif split_type == 'Test':
                 test_recs.append(record)
 
-    print(f"  -> 成功装载三模态配对数据: 训练集 {len(train_recs)} | 验证集 {len(val_recs)} | 测试集 {len(test_recs)}")
+    print(
+        f"  -> Successfully loaded tri-modal data: Train {len(train_recs)} | Val {len(val_recs)} | Test {len(test_recs)}")
     class_weights = compute_class_weight('balanced', classes=np.unique(train_labels), y=train_labels)
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
     return train_recs, val_recs, test_recs, class_weights_tensor
@@ -134,9 +125,9 @@ class TriModalDataset(Dataset):
             try:
                 with open(path, 'r', encoding='gbk') as f:
                     return f.read().strip()
-            except Exception:
+            except:
                 return ""
-        except Exception:
+        except:
             return ""
 
     def _process_audio(self, file_path):
@@ -193,7 +184,7 @@ class TriModalDataset(Dataset):
     def __getitem__(self, idx):
         record = self.data_records[idx]
         text = self._read_text(record['txt_path'])
-        encoded = self.tokenizer(text if text else "未知", padding='max_length', truncation=True,
+        encoded = self.tokenizer(text if text else "Unknown", padding='max_length', truncation=True,
                                  max_length=self.max_txt_len, return_tensors='pt')
         audio_tensor = self._process_audio(record['wav_path'])
         video_tensor = self._load_video(record['video_path'])
@@ -203,15 +194,13 @@ class TriModalDataset(Dataset):
 
 
 # ==========================================
-# 模块 2：优选特征提取器网络 (去除分类头)
+# Module 2: Optimized Feature Extractor (No Heads)
 # ==========================================
 class TextCNNFeatureExtractor(nn.Module):
     def __init__(self, embedding_dim=768, num_filters=100, filter_sizes=(3, 4, 5)):
         super().__init__()
-        self.convs = nn.ModuleList([
-            nn.Conv2d(1, num_filters, (k, embedding_dim)) for k in filter_sizes
-        ])
-        self.feature_dim = len(filter_sizes) * num_filters  # 300
+        self.convs = nn.ModuleList([nn.Conv2d(1, num_filters, (k, embedding_dim)) for k in filter_sizes])
+        self.feature_dim = len(filter_sizes) * num_filters
 
     def forward(self, x):
         x = x.unsqueeze(1)
@@ -221,9 +210,9 @@ class TextCNNFeatureExtractor(nn.Module):
 
 
 class OptimalTriModalFusionNet(nn.Module):
-    def __init__(self, bert_path, num_classes=3):
+    def __init__(self, bert_path, seresnet_path=None, num_classes=3):
         super().__init__()
-        print("  -> [架构加载] TextCNN (Text) + SEResNet50 (Audio) + MC3_18 (Video)")
+        print("  -> [Architecture] Initializing TextCNN (Text) + SEResNet50 (Audio) + MC3_18 (Video)")
 
         # 1. Text Modality (BERT Base + TextCNN)
         self.frozen_bert = BertModel.from_pretrained(bert_path)
@@ -232,22 +221,26 @@ class OptimalTriModalFusionNet(nn.Module):
         text_dim = 300
 
         # 2. Audio Modality (SEResNet50)
-        if not os.path.exists(SERESNET50_WEIGHT_PATH): raise FileNotFoundError(
-            "\n[致命错误] 本地 SEResNet50 预训练权重缺失！")
-        self.audio_extractor = timm.create_model('seresnet50.ra2_in1k', pretrained=False, num_classes=1000)
-        self.audio_extractor.load_state_dict(torch.load(SERESNET50_WEIGHT_PATH, map_location='cpu'), strict=True)
-        self.audio_extractor.reset_classifier(0)  # 剔除最后的全连接层
-        for param in self.audio_extractor.parameters(): param.requires_grad = False  # 冻结音频网络防过拟合
+        if seresnet_path and os.path.exists(seresnet_path):
+            self.audio_extractor = timm.create_model('seresnet50.ra2_in1k', pretrained=False, num_classes=1000)
+            self.audio_extractor.load_state_dict(torch.load(seresnet_path, map_location='cpu', weights_only=True),
+                                                 strict=True)
+        else:
+            print("  -> [Weights] Downloading default SEResNet50 from timm.")
+            self.audio_extractor = timm.create_model('seresnet50.ra2_in1k', pretrained=True, num_classes=1000)
+
+        self.audio_extractor.reset_classifier(0)
+        for param in self.audio_extractor.parameters(): param.requires_grad = False
         audio_dim = 2048
 
         # 3. Video Modality (MC3_18)
         self.video_extractor = video_models.mc3_18(pretrained=True)
-        self.video_extractor.fc = nn.Identity()  # 剔除最后的全连接层
-        for param in self.video_extractor.parameters(): param.requires_grad = False  # 冻结视频网络防过拟合
+        self.video_extractor.fc = nn.Identity()
+        for param in self.video_extractor.parameters(): param.requires_grad = False
         video_dim = 512
 
         # 4. Fusion Classifier (MLP)
-        total_dim = text_dim + audio_dim + video_dim  # 2860
+        total_dim = text_dim + audio_dim + video_dim
         self.classifier = nn.Sequential(
             nn.Linear(total_dim, 256),
             nn.BatchNorm1d(256),
@@ -257,12 +250,12 @@ class OptimalTriModalFusionNet(nn.Module):
         )
 
     def forward(self, ids, masks, audios, videos):
-        # 文本前向传播 (支持梯度的 TextCNN)
+        # Allow gradients for Text CNN
         with torch.no_grad():
             bert_out = self.frozen_bert(ids, attention_mask=masks).last_hidden_state
         t_feat = self.text_extractor(bert_out)
 
-        # 音频、视频前向传播 (无梯度，纯提特征)
+        # Pure feature extraction for Audio and Video
         with torch.no_grad():
             a_feat = self.audio_extractor(audios)
             v_feat = self.video_extractor(videos)
@@ -271,7 +264,7 @@ class OptimalTriModalFusionNet(nn.Module):
 
 
 # ==========================================
-# 模块 3：评估引擎与训练循环 (保持原样，支持多任务 15 列指标感知)
+# Module 3: Evaluation Engine
 # ==========================================
 def safe_metrics(y_true, y_pred, y_prob):
     if len(y_true) == 0: return 0.0, 0.0, 0.0
@@ -363,7 +356,7 @@ def train_eval_single_fold(model, train_loader, val_loader, class_weights_tensor
             epochs_no_improve += 1
 
         if epochs_no_improve >= patience:
-            print(f"    -> [早停触发] Global AUC 连续 {patience} 轮无提升，终止当前 LR。")
+            print(f"    -> [Early Stopping] Global AUC no improvement for {patience} epochs. Terminating LR.")
             break
 
     model.load_state_dict(best_model_wts)
@@ -371,15 +364,14 @@ def train_eval_single_fold(model, train_loader, val_loader, class_weights_tensor
 
 
 # ==========================================
-# 模块 4：优选架构执行与导出大满贯引擎
+# Module 4: Execution Engine
 # ==========================================
-def run_optimal_fusion_experiment(tr_recs, val_recs, ts_recs, class_wts, bert_path):
+def run_optimal_fusion_experiment(tr_recs, val_recs, ts_recs, class_wts, bert_path, seresnet_path):
     tokenizer = BertTokenizer.from_pretrained(bert_path)
     train_ds = TriModalDataset(tr_recs, tokenizer)
     val_ds = TriModalDataset(val_recs, tokenizer)
     test_ds = TriModalDataset(ts_recs, tokenizer)
 
-    # 批次调小以防御 OOM，使用梯度累积补偿
     train_loader = DataLoader(train_ds, batch_size=2, shuffle=True, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=2, shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=2, shuffle=False)
@@ -391,18 +383,18 @@ def run_optimal_fusion_experiment(tr_recs, val_recs, ts_recs, class_wts, bert_pa
     encoders_name = "TextCNN+SEResNet50+MC3_18"
 
     print("\n" + "=" * 90)
-    print(f"开始优选三模态融合盲测: {encoders_name}")
+    print(f"Starting Optimal Tri-Modal Fusion: {encoders_name}")
     print("=" * 90)
 
     for lr in lr_list:
-        model = OptimalTriModalFusionNet(bert_path).to(DEVICE)
+        model = OptimalTriModalFusionNet(bert_path, seresnet_path=seresnet_path).to(DEVICE)
         start_t = time.time()
 
         val_auc, best_wts = train_eval_single_fold(
             model, train_loader, val_loader, class_wts, lr,
             epochs=25, patience=6, accumulation_steps=8
         )
-        print(f"  [-] LR: {lr:<7} | 验证集 Global AUC: {val_auc:>6.2f}% (总耗时: {time.time() - start_t:>2.0f}s)")
+        print(f"  [-] LR: {lr:<7} | Val Global AUC: {val_auc:>6.2f}% (Time: {time.time() - start_t:>2.0f}s)")
 
         temp_logs.append({
             "Paradigm": paradigm_name, "Encoders": encoders_name,
@@ -413,14 +405,15 @@ def run_optimal_fusion_experiment(tr_recs, val_recs, ts_recs, class_wts, bert_pa
         gc.collect()
 
     best_log = max(temp_logs, key=lambda x: x["Val_Global_AUC"])
-    print(f"\n[!] 融合网络调优结束 (最佳LR: {best_log['Learning_Rate']})，解锁独立测试集执行终极盲测...")
+    print(f"\n[!] Tuning complete (Best LR: {best_log['Learning_Rate']}). Unlocking blind test set...")
 
-    final_model = OptimalTriModalFusionNet(bert_path).to(DEVICE)
+    final_model = OptimalTriModalFusionNet(bert_path, seresnet_path=seresnet_path).to(DEVICE)
     final_model.load_state_dict(best_log['Weights_Dict'])
     test_res = evaluate_multitask_model(final_model, test_loader, desc="Final Blind Testing")
 
     g_res = test_res["Global"]
-    print(f"    --> 全局终极表现: AUC {g_res['AUC']:.2f}% | UAR {g_res['UAR']:.2f}% | WAR {g_res['WAR']:.2f}%")
+    print(
+        f"    --> Final Global Performance: AUC {g_res['AUC']:.2f}% | UAR {g_res['UAR']:.2f}% | WAR {g_res['WAR']:.2f}%")
 
     all_results = []
     for log in temp_logs:
@@ -446,7 +439,6 @@ def run_optimal_fusion_experiment(tr_recs, val_recs, ts_recs, class_wts, bert_pa
     df_results = pd.DataFrame(all_results)
     df_optimal = df_results[df_results["Is_Optimal"] == True]
 
-    # ================= 输出 15 列航母级 LaTeX 表格 =================
     latex_str = "\\begin{table*}[htbp]\n\\centering\n\\resizebox{\\textwidth}{!}{\n\\begin{tabular}{lll ccc ccc ccc ccc}\n\\toprule\n"
     latex_str += "\\multirow{2}{*}{\\textbf{Paradigm}} & \\multirow{2}{*}{\\textbf{Encoders (T+A+V)}} & \\multirow{2}{*}{\\textbf{Best LR}} & \\multicolumn{3}{c}{\\textbf{Global}} & \\multicolumn{3}{c}{\\textbf{Pic. 1}} & \\multicolumn{3}{c}{\\textbf{Pic. 2}} & \\multicolumn{3}{c}{\\textbf{Pic. 3}} \\\\\n"
     latex_str += "\\cmidrule(lr){4-6} \\cmidrule(lr){7-9} \\cmidrule(lr){10-12} \\cmidrule(lr){13-15}\n"
@@ -465,19 +457,28 @@ def run_optimal_fusion_experiment(tr_recs, val_recs, ts_recs, class_wts, bert_pa
 
 
 if __name__ == "__main__":
-    if len(os.listdir(DATASET_BASE_DIR)) > 0:
-        tr_recs, val_recs, ts_recs, class_wts = load_trimodal_dataset_from_csv(CSV_PATH, DATASET_BASE_DIR)
+    parser = argparse.ArgumentParser(description="Optimal Tri-Modal Setup Pipeline")
+    parser.add_argument('--csv_path', type=str, required=True, help='Path to master split CSV file')
+    parser.add_argument('--data_dir', type=str, required=True, help='Base directory for dataset')
+    parser.add_argument('--output_dir', type=str, default='./outputs/Cross_modal/TriModal_Optimal',
+                        help='Output directory')
+    parser.add_argument('--bert_path', type=str, default='bert-base-chinese', help='Path to BERT model')
+    parser.add_argument('--seresnet_path', type=str, default=None, help='Local path for SEResNet50 weights (optional)')
+
+    args = parser.parse_args()
+
+    if len(os.listdir(args.data_dir)) > 0:
+        tr_recs, val_recs, ts_recs, class_wts = load_trimodal_dataset_from_csv(args.csv_path, args.data_dir)
 
         if len(tr_recs) > 0:
-            df_results, latex_snippet = run_optimal_fusion_experiment(tr_recs, val_recs, ts_recs, class_wts, BERT_PATH)
+            df_results, latex_snippet = run_optimal_fusion_experiment(
+                tr_recs, val_recs, ts_recs, class_wts, args.bert_path, args.seresnet_path)
 
-            print("\n--- 供论文引用的 15列超宽多任务感知表 ---")
+            print("\n--- LaTeX Table Snippet for Citation ---")
             print(latex_snippet)
 
             current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            os.makedirs(OUTPUT_BASE_DIR, exist_ok=True)
-            df_results.to_csv(os.path.join(OUTPUT_BASE_DIR, f"Optimal_Fusion_Results_{current_time}.csv"), index=False)
-            with open(os.path.join(OUTPUT_BASE_DIR, f"latex_table_{current_time}.txt"), 'w', encoding='utf-8') as f:
+            os.makedirs(args.output_dir, exist_ok=True)
+            df_results.to_csv(os.path.join(args.output_dir, f"Optimal_Fusion_Results_{current_time}.csv"), index=False)
+            with open(os.path.join(args.output_dir, f"latex_table_{current_time}.txt"), 'w', encoding='utf-8') as f:
                 f.write(latex_snippet)
-
-            print(f"\n[运行完毕] 详细结果与用于提交的 LaTeX 代码已存档至: {OUTPUT_BASE_DIR}")

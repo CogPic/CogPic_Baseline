@@ -2,6 +2,7 @@ import os
 import time
 import datetime
 import copy
+import argparse
 import pandas as pd
 import numpy as np
 import warnings
@@ -13,11 +14,11 @@ from sklearn.utils.class_weight import compute_class_weight
 from sklearn.metrics import recall_score, roc_auc_score
 
 # ==========================================
-# 0. 环境警告与日志静音配置
+# 0. Environment & Logging Setup
 # ==========================================
 warnings.filterwarnings('ignore')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+# os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
 import torch
 import torch.nn as nn
@@ -32,21 +33,12 @@ import soundfile as sf
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ==========================================
-# 本地模型绝对路径配置 (请确保路径正确)
-# ==========================================
-TIMM_RESNET18_PATH = r"D:\Code\Project\Dataset\Models\timm_resnet18\pytorch_model.bin"
-SERESNET50_WEIGHT_PATH = r"D:\Code\Project\Dataset\Models\seresnet50.ra2_in1k\pytorch_model.bin"
-CSV_PATH = r"D:\Code\Project\Dataset\Official_Master_Split.csv"
-DATASET_BASE_DIR = r"D:\Code\Project\Dataset\Full_wly"
-OUTPUT_BASE_DIR = r"D:\Code\Project\Dataset\Cross_modal_Performance\DL_Benchmark\Audio_Video_diff"
-
 
 # ==========================================
-# 模块 1：严格对齐的音频-视频数据加载
+# Module 1: Strictly Aligned Data Loading
 # ==========================================
 def load_aligned_audio_video_dataset_from_csv(csv_path, base_dir):
-    print(f"\n[阶段 1] 数据加载 -> 正在读取全局主划分名单: {csv_path}")
+    print(f"\n[Data Loading] Reading master split list: {csv_path}")
     df = pd.read_csv(csv_path)
 
     path_mapping = {}
@@ -84,7 +76,8 @@ def load_aligned_audio_video_dataset_from_csv(csv_path, base_dir):
             elif split_type == 'Test':
                 test_recs.append(record)
 
-    print(f"  -> 成功装载视听双模态数据: 训练集 {len(train_recs)} | 验证集 {len(val_recs)} | 测试集 {len(test_recs)}")
+    print(
+        f"  -> Successfully loaded bimodal data: Train {len(train_recs)} | Val {len(val_recs)} | Test {len(test_recs)}")
     class_weights = compute_class_weight('balanced', classes=np.unique(train_labels), y=train_labels)
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
     return train_recs, val_recs, test_recs, class_weights_tensor
@@ -95,8 +88,8 @@ class AudioVideoAblationDataset(Dataset):
         self.data_records = data_records
         self.target_sr = target_sr
         self.target_samples = int(target_sr * target_duration)
-        self.mel_transform = torchaudio.transforms.MelSpectrogram(sample_rate=target_sr, n_mels=224, n_fft=1024,
-                                                                  hop_length=512)
+        self.mel_transform = torchaudio.transforms.MelSpectrogram(
+            sample_rate=target_sr, n_mels=224, n_fft=1024, hop_length=512)
         self.db_transform = torchaudio.transforms.AmplitudeToDB()
         self.imagenet_normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
@@ -157,7 +150,7 @@ class AudioVideoAblationDataset(Dataset):
         except:
             frames = [self.dummy_frame] * 120
 
-        return torch.stack(frames).permute(1, 0, 2, 3)  # 输出形状: (3, 120, 224, 224)
+        return torch.stack(frames).permute(1, 0, 2, 3)
 
     def __len__(self):
         return len(self.data_records)
@@ -170,7 +163,7 @@ class AudioVideoAblationDataset(Dataset):
 
 
 # ==========================================
-# 模块 2：动态视听骨干网络工厂 (升级版 - 包含显存保护机制)
+# Module 2: Dynamic Spatiotemporal Backbone Factory (With VRAM Safeguards)
 # ==========================================
 class AudioCRNN(nn.Module):
     def __init__(self, output_dim=256):
@@ -191,50 +184,48 @@ class AudioCRNN(nn.Module):
 
 
 class AudioVideoFusionNet(nn.Module):
-    def __init__(self, audio_model_name, video_model_name, num_classes=3, dropout_rate=0.5, freeze_backbones=True):
+    def __init__(self, audio_model_name, video_model_name, num_classes=3, dropout_rate=0.5, freeze_backbones=True,
+                 seresnet_path=None):
         super().__init__()
         self.audio_model_name = audio_model_name
         self.video_model_name = video_model_name
         self.freeze_backbones = freeze_backbones
 
-        # --- A. 音频编码器 ---
+        # --- A. Audio Encoder ---
         if audio_model_name == "ResNetSE":
-            # 兼容原代码的本地 SEResNet50 离线加载方式
-            print(f"  -> [权重加载] 正在严格加载本地 SEResNet50 (Audio): {SERESNET50_WEIGHT_PATH}")
-            if not os.path.exists(SERESNET50_WEIGHT_PATH):
-                raise FileNotFoundError("\n[致命错误] 未找到本地音频预训练权重，拒绝随机初始化！")
-            self.audio_encoder = timm.create_model('seresnet50.ra2_in1k', pretrained=False, num_classes=1000,
-                                                   checkpoint_path=SERESNET50_WEIGHT_PATH)
+            if seresnet_path and os.path.exists(seresnet_path):
+                self.audio_encoder = timm.create_model('seresnet50.ra2_in1k', pretrained=False, num_classes=1000,
+                                                       checkpoint_path=seresnet_path)
+            else:
+                self.audio_encoder = timm.create_model('seresnet50.ra2_in1k', pretrained=True, num_classes=1000)
+
             self.audio_encoder.reset_classifier(0)
-            audio_dim = 2048  # SEResNet50 提取出的特征维度是 2048
+            audio_dim = 2048
 
         elif audio_model_name == "CRNN":
             self.audio_encoder = AudioCRNN(output_dim=256)
             audio_dim = 256
         else:
-            raise ValueError(f"不支持的音频模型: {audio_model_name}")
+            raise ValueError(f"Unsupported audio model: {audio_model_name}")
 
-        # --- B. 视频编码器 ---
+        # --- B. Video Encoder ---
         if video_model_name == "MC3_18":
             self.video_encoder = video_models.mc3_18(pretrained=True)
             self.video_encoder.fc = nn.Identity()
             video_dim = 512
-
         elif video_model_name == "R3D_18":
             self.video_encoder = video_models.r3d_18(pretrained=True)
             self.video_encoder.fc = nn.Identity()
             video_dim = 512
         else:
-            raise ValueError(f"不支持的视频模型: {video_model_name}")
+            raise ValueError(f"Unsupported video model: {video_model_name}")
 
-        # 【安全保护】：如果需要冻结，显式关闭参数的梯度属性
+        # Safety Guard: Explicitly disable gradients if freeze is requested
         if self.freeze_backbones:
-            for param in self.audio_encoder.parameters():
-                param.requires_grad = False
-            for param in self.video_encoder.parameters():
-                param.requires_grad = False
+            for param in self.audio_encoder.parameters(): param.requires_grad = False
+            for param in self.video_encoder.parameters(): param.requires_grad = False
 
-        # --- C. 融合分类头 (保持开启梯度) ---
+        # --- C. Fusion Head ---
         fusion_dim = audio_dim + video_dim
         self.classifier = nn.Sequential(
             nn.Linear(fusion_dim, 512),
@@ -250,10 +241,12 @@ class AudioVideoFusionNet(nn.Module):
 
     def forward(self, audio_input, video_input):
         B, C, T, H, W = video_input.size()
+
+        # Adjust spatial dimension for robust compatibility with 3D CNNs
         if H != 112 or W != 112:
             video_input = F.interpolate(video_input, size=(T, 112, 112), mode='trilinear', align_corners=False)
 
-        # 【显存保护】：彻底切断骨干网络的梯度图构建
+        # Disconnect computation graphs entirely to save VRAM
         if self.freeze_backbones:
             with torch.no_grad():
                 a_feat = self.audio_encoder(audio_input)
@@ -263,13 +256,11 @@ class AudioVideoFusionNet(nn.Module):
             v_feat = self.video_encoder(video_input)
 
         fused_feat = torch.cat((a_feat, v_feat), dim=1)
-        logits = self.classifier(fused_feat)
-
-        return logits
+        return self.classifier(fused_feat)
 
 
 # ==========================================
-# 模块 3：OOM 防御训练引擎 (含进度条与实时Loss)
+# Module 3: Anti-OOM Training Engine
 # ==========================================
 def evaluate_model(model, dataloader):
     model.eval()
@@ -335,7 +326,7 @@ def train_eval_single_fold(model, train_loader, val_loader, class_weights_tensor
             epochs_no_improve += 1
 
         if epochs_no_improve >= patience:
-            print(f"    -> [早停机制触发] 验证集连续 {patience} 轮无提升，提前结束该学习率的训练。")
+            print(f"    -> [Early Stopping] Validation set showed no improvement for {patience} consecutive epochs.")
             break
 
     model.load_state_dict(best_model_wts)
@@ -343,19 +334,17 @@ def train_eval_single_fold(model, train_loader, val_loader, class_weights_tensor
 
 
 # ==========================================
-# 模块 4：执行视听双模态架构消融大满贯
+# Module 4: Execute Audio-Video Optimized Ablation
 # ==========================================
-def run_audio_video_ablation(tr_recs, val_recs, ts_recs, class_wts):
+def run_audio_video_ablation(tr_recs, val_recs, ts_recs, class_wts, seresnet_path):
     train_ds = AudioVideoAblationDataset(tr_recs)
     val_ds = AudioVideoAblationDataset(val_recs)
     test_ds = AudioVideoAblationDataset(ts_recs)
 
-    # 应对双模态 3D 卷积的极限降压：物理 BatchSize=2，Accumulation=8，等效 16
     train_loader = DataLoader(train_ds, batch_size=2, shuffle=True, drop_last=True)
     val_loader = DataLoader(val_ds, batch_size=2, shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=2, shuffle=False)
 
-    # 【核心修改点】：仅保留我们精选的两个王牌对照组合
     combinations = [
         {"audio": "ResNetSE", "video": "MC3_18", "paradigm": "Attention & Multi-scale Spatiotemporal"},
         {"audio": "CRNN", "video": "R3D_18", "paradigm": "Explicit Temporal & Standard 3D"}
@@ -365,17 +354,17 @@ def run_audio_video_ablation(tr_recs, val_recs, ts_recs, class_wts):
     all_results = []
 
     print("\n" + "=" * 80)
-    print("开始 Audio+Video 视听联合提取消融实验 (冻结骨干网络，微调 Concat-MLP)")
+    print("Starting Optimized Audio-Video Fusion Experiment (Frozen Backbones, Fine-tuning Concat-MLP)")
     print("=" * 80)
 
     for combo in combinations:
         a_name, v_name, paradigm = combo["audio"], combo["video"], combo["paradigm"]
-        print(f"\n>>> 正在验证范式: {paradigm} ({a_name} + {v_name}) <<<")
+        print(f"\n>>> Validating Paradigm: {paradigm} ({a_name} + {v_name}) <<<")
         temp_logs = []
 
         for lr in lr_list:
-            # 实例化全新模型，默认开启 freeze_backbones=True 防爆显存
-            model = AudioVideoFusionNet(a_name, v_name, num_classes=3, freeze_backbones=True).to(DEVICE)
+            model = AudioVideoFusionNet(a_name, v_name, num_classes=3, freeze_backbones=True,
+                                        seresnet_path=seresnet_path).to(DEVICE)
             start_t = time.time()
 
             val_auc, best_wts = train_eval_single_fold(
@@ -383,30 +372,31 @@ def run_audio_video_ablation(tr_recs, val_recs, ts_recs, class_wts):
                 epochs=25, patience=6, accumulation_steps=8
             )
 
-            print(f"  [-] LR: {lr:<7} | 验证集最佳 AUC: {val_auc:>6.2f}% (总耗时: {time.time() - start_t:>2.0f}s)")
+            print(f"  [-] LR: {lr:<7} | Best Val AUC: {val_auc:>6.2f}% (Time: {time.time() - start_t:>2.0f}s)")
 
             temp_logs.append({
                 "Paradigm": paradigm, "Audio_Encoder": a_name, "Video_Encoder": v_name,
                 "Learning_Rate": lr, "Val_AUC": val_auc, "Weights_Dict": copy.deepcopy(best_wts)
             })
-            del model;
-            torch.cuda.empty_cache();
+            del model
+            torch.cuda.empty_cache()
             gc.collect()
 
         best_log = max(temp_logs, key=lambda x: x["Val_AUC"])
-        print(f"[!] {paradigm} 最优网络结构定型 (最佳LR: {best_log['Learning_Rate']})，即将执行仅此一次的测试集盲测...")
+        print(
+            f"[!] Optimal configuration acquired for {paradigm} (Best LR: {best_log['Learning_Rate']}). Unlocking test set...")
 
-        # 测试阶段重新加载最优权重
-        final_model = AudioVideoFusionNet(a_name, v_name, num_classes=3, freeze_backbones=True).to(DEVICE)
+        final_model = AudioVideoFusionNet(a_name, v_name, num_classes=3, freeze_backbones=True,
+                                          seresnet_path=seresnet_path).to(DEVICE)
         final_model.load_state_dict(best_log['Weights_Dict'])
         test_uar, test_war, test_auc = evaluate_model(final_model, test_loader)
-        print(f"    --> 测试集终极表现: AUC {test_auc:.2f}% | UAR {test_uar:.2f}% | WAR {test_war:.2f}%")
+        print(f"    --> Final Test Performance: AUC {test_auc:.2f}% | UAR {test_uar:.2f}% | WAR {test_war:.2f}%")
 
         best_log["Test_UAR"] = test_uar
         best_log["Test_WAR"] = test_war
         best_log["Test_AUC"] = test_auc
 
-        del final_model;
+        del final_model
         gc.collect()
 
         for log in temp_logs:
@@ -434,18 +424,29 @@ def run_audio_video_ablation(tr_recs, val_recs, ts_recs, class_wts):
 
 
 if __name__ == "__main__":
-    if len(os.listdir(DATASET_BASE_DIR)) > 0:
-        tr_recs, val_recs, ts_recs, class_wts = load_aligned_audio_video_dataset_from_csv(CSV_PATH, DATASET_BASE_DIR)
+    parser = argparse.ArgumentParser(description="Optimized Audio-Video Bimodal Ablation Experiments")
+    parser.add_argument('--csv_path', type=str, required=True, help='Path to master split CSV file')
+    parser.add_argument('--data_dir', type=str, required=True, help='Base directory for dataset')
+    parser.add_argument('--output_dir', type=str, default='./outputs/Cross_modal/Audio_Video_Opt',
+                        help='Output directory')
+    parser.add_argument('--seresnet_path', type=str, default=None,
+                        help='Local path for SEResNet50 timm weights (optional)')
+
+    args = parser.parse_args()
+
+    if len(os.listdir(args.data_dir)) > 0:
+        tr_recs, val_recs, ts_recs, class_wts = load_aligned_audio_video_dataset_from_csv(args.csv_path, args.data_dir)
 
         if len(tr_recs) > 0:
-            df_results, latex_snippet = run_audio_video_ablation(tr_recs, val_recs, ts_recs, class_wts)
+            df_results, latex_snippet = run_audio_video_ablation(tr_recs, val_recs, ts_recs, class_wts,
+                                                                 args.seresnet_path)
 
-            print("\n--- 供论文引用的 视听联合架构敏感性消融表 ---")
+            print("\n--- LaTeX Table Snippet for Citation ---")
             print(latex_snippet)
 
             current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            os.makedirs(OUTPUT_BASE_DIR, exist_ok=True)
-            df_results.to_csv(os.path.join(OUTPUT_BASE_DIR, f"Audio_Video_Ablation_Results_{current_time}.csv"),
+            os.makedirs(args.output_dir, exist_ok=True)
+            df_results.to_csv(os.path.join(args.output_dir, f"Audio_Video_Ablation_Results_{current_time}.csv"),
                               index=False)
-            with open(os.path.join(OUTPUT_BASE_DIR, f"latex_table_{current_time}.txt"), 'w', encoding='utf-8') as f:
+            with open(os.path.join(args.output_dir, f"latex_table_{current_time}.txt"), 'w', encoding='utf-8') as f:
                 f.write(latex_snippet)
