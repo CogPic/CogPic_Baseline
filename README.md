@@ -32,15 +32,12 @@ This module contains 3 scripts dedicated to utilizing various domain-expert tool
 This module contains 8 scripts used to establish the performance limits and baselines for each individual modality.
 * Text:
   * Single_text_modality_DL.py: Baselines for BERT fine-tuning, TextCNN, BiLSTM, and Att-BiLSTM.
-  * Single_text_modality_ML.py: Traditional ML classification concatenating BERT [CLS] embedding vectors with handcrafted linguistic features.
 * Audio:
   * Single_audio_modality_DL.py: Vision-based architectures utilizing Mel spectrograms.
   * Single_audio_modality_DL_end_to_end.py: End-to-end architectures based on raw 1D waveforms.
-  * Single_audio_modality_ML.py: ML classification calling OpenSMILE to extract 88-dimensional expert acoustic features.
 * Video:
   * Single_video_modality_DL.py: Spatiotemporal 3D convolution tuning (R3D_18, MC3_18, R2Plus1D, ResNet+LSTM).
   * Single_video_modality_DL_C3D.py: Experiments with the classical C3D architecture.
-  * Single_video_modality_ML.py: ML baselines based on OpenFace-extracted statistics for AUs, gaze, and head pose.
 
 ### Module 3: Cross-Modal Fusion
 This module contains 7 scripts, utilizing a Concat-MLP for Late Fusion by freezing single-modal pre-trained backbone networks.
