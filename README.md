@@ -51,7 +51,7 @@ This module contains 7 scripts, utilizing a Concat-MLP for Late Fusion by freezi
 
 ### Module 4: ML Fusion & Interpretability
 This module contains 2 scripts to address the crucial issues of model credibility and interpretability in clinical medical scenarios.
-* Interpretability_ML_Fusion.py: Merges the three handcrafted feature tables (Text, Audio, Video) to evaluate traditional classifiers.
+* Interpretability_ML_Fusion.py: This script serves as the core machine learning baseline evaluation pipeline. It systematically evaluates the predictive performance of traditional classifiers using handcrafted unimodal features (Text, Audio, Video) and their multimodal early fusion (T+A+V).
 * For_SHAP_plot.py: Automatically selects the optimal tree-based model and utilizes SHAP to calculate the global importance of features.
 
 ---
